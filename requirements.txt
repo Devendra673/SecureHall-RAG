@@ -1,0 +1,41 @@
+# SecureHall-RAG Requirements
+# Python 3.10+
+
+# Core ML/LLM dependencies
+torch>=2.1.0
+transformers>=4.30.0
+sentence-transformers>=2.2.0
+ollama>=0.1.0
+numpy>=1.24.0,<2.0.0
+
+# Vector databases and retrieval
+faiss-cpu>=1.7.4
+# faiss-gpu>=1.7.4  # Uncomment if using GPU
+rank-bm25>=0.2.2
+
+# NLP and text processing
+nltk>=3.8.1
+python-docx>=0.8.11
+PyPDF2>=3.0.0
+
+# Web frameworks (Phase 5B)
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+pydantic>=2.0.0
+python-multipart>=0.0.6
+
+# Utilities
+python-dotenv>=1.0.0
+pyyaml>=6.0.0
+tqdm>=4.66.0
+psutil>=5.9.0
+
+# Development dependencies (optional)
+pytest>=7.0.0
+pytest-cov>=4.0.0
+black>=23.0.0
+flake8>=6.0.0
+mypy>=1.0.0
+
+# Data handling (optional)
+# pandas>=2.0.0
