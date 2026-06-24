@@ -17,19 +17,21 @@ try:
     # Package usage (e.g. called from FastAPI)
     from .ingestion.document_parser import DocumentParser
     from .ingestion.chunker import SemanticChunker
-    from .ingestion.metadata_tracker import MetadataStore, ChunkMetadata
+    from .ingestion.metadata_tracker import MetadataStore, ChunkMetadata, DocumentMetadata
     from .retrieval.hybrid_retriever import HybridRetriever, SearchResult
     from .retrieval.reranker import CrossEncoderReRanker
     from .llm.inference import LLMInference
+    from .retrieval.web_search import WebSearchService
 except ImportError:
     # Standalone / script usage
     sys.path.insert(0, str(Path(__file__).parent))
     from ingestion.document_parser import DocumentParser
     from ingestion.chunker import SemanticChunker
-    from ingestion.metadata_tracker import MetadataStore, ChunkMetadata
+    from ingestion.metadata_tracker import MetadataStore, ChunkMetadata, DocumentMetadata
     from retrieval.hybrid_retriever import HybridRetriever, SearchResult
     from retrieval.reranker import CrossEncoderReRanker
     from llm.inference import LLMInference
+    from retrieval.web_search import WebSearchService
 
 # ── Verification pipeline (optional — gracefully skipped if unavailable) ──────
 try:
@@ -86,6 +88,7 @@ class RAGPipeline:
         temperature: float = 0.3,
         reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
         enable_reranking: bool = True,
+        data_dir: Optional[str] = None,
     ):
         """
         Initialize RAG pipeline components.
@@ -101,10 +104,11 @@ class RAGPipeline:
         self.chunker = SemanticChunker(chunk_size_tokens=chunk_size_tokens)
         self.metadata_store = MetadataStore()
         self.retriever = HybridRetriever(dense_model=dense_model)
+        self.web_search_service = WebSearchService()
 
         self.enable_reranking = enable_reranking
         if self.enable_reranking:
-            self.reranker = CrossEncoderReRanker(model_name=reranker_model)
+            self.reranker = CrossEncoderReRanker(model_name=reranker_model, device="cpu")
         else:
             self.reranker = None
 
@@ -121,11 +125,18 @@ class RAGPipeline:
         self._corpus_texts: List[str] = []
         self._corpus_chunk_ids: List[str] = []
 
+        # Persistence directory
+        self.data_dir = data_dir
+
         logger.info(
             f"RAGPipeline initialized: llm={llm_model}, "
             f"dense={dense_model}, chunk_size={chunk_size_tokens}, "
-            f"top_k={retrieval_top_k}"
+            f"top_k={retrieval_top_k}, data_dir={data_dir}"
         )
+
+        # Attempt to load previously persisted indices from disk
+        if self.data_dir:
+            self._load_persisted_state()
 
     def ingest_documents(self, file_paths: List[str]) -> int:
         """
@@ -168,6 +179,45 @@ class RAGPipeline:
                     continue
 
                 logger.info(f"Processing: {file_path.name}")
+
+                # Remove any existing chunks for this file to prevent duplicates
+                prefix = f"{file_path.stem}_"
+                filtered_corpus = [
+                    (cid, txt) for cid, txt in zip(self._corpus_chunk_ids, self._corpus_texts)
+                    if not cid.startswith(prefix)
+                ]
+                if len(filtered_corpus) < len(self._corpus_chunk_ids):
+                    logger.info(f"Removing old chunks for document {file_path.name} from corpus to avoid duplicates.")
+                    self._corpus_chunk_ids = [item[0] for item in filtered_corpus]
+                    self._corpus_texts = [item[1] for item in filtered_corpus]
+                    
+                # Clean in-memory chunk map
+                for cid in list(self.chunk_id_to_text.keys()):
+                    if cid.startswith(prefix):
+                        del self.chunk_id_to_text[cid]
+                        
+                # Clean in-memory metadata store
+                for cid in list(self.metadata_store.chunk_metadata.keys()):
+                    if cid.startswith(prefix):
+                        del self.metadata_store.chunk_metadata[cid]
+                        
+                for doc_key in list(self.metadata_store.document_metadata.keys()):
+                    if doc_key == file_path.name or doc_key == str(file_path) or Path(doc_key).stem == file_path.stem:
+                        del self.metadata_store.document_metadata[doc_key]
+                        
+                # Clean SQLite DB tables (if persistent)
+                if self.metadata_store.db_path:
+                    import sqlite3
+                    try:
+                        conn = sqlite3.connect(str(self.metadata_store.db_path))
+                        cursor = conn.cursor()
+                        cursor.execute("DELETE FROM chunks WHERE chunk_id LIKE ?", (f"{prefix}%",))
+                        cursor.execute("DELETE FROM documents WHERE source_doc = ? OR source_doc = ? OR source_doc LIKE ?", 
+                                       (file_path.name, str(file_path), f"%{file_path.stem}%"))
+                        conn.commit()
+                        conn.close()
+                    except Exception as db_err:
+                        logger.warning(f"Failed to delete old metadata from database: {db_err}")
 
                 # Parse document → list of (text, DocumentMetadata) tuples
                 parsed_tuples = self.parser.parse(str(file_path))
@@ -212,6 +262,16 @@ class RAGPipeline:
                     self.metadata_store.add_chunk(chunk_metadata)
                     chunk_count += 1
 
+                # Register document in metadata store
+                doc_meta = DocumentMetadata(
+                    source_doc=file_path.name,
+                    file_path=str(file_path),
+                    total_chunks=len(chunks),
+                    total_characters=len(full_text),
+                    file_size_bytes=file_path.stat().st_size if file_path.exists() else len(full_text),
+                )
+                self.metadata_store.register_document(doc_meta)
+
             if chunk_count == 0:
                 raise RuntimeError("No valid chunks created from documents")
 
@@ -253,11 +313,31 @@ class RAGPipeline:
             logger.error(f"Ingestion failed: {str(e)}")
             raise RuntimeError(f"Document ingestion failed: {str(e)}")
 
+    def _is_conversational_query(self, question: str) -> bool:
+        """Check if the question is a greeting or general pleasantry that doesn't need RAG context."""
+        q = question.lower().strip().rstrip("?.!")
+        greetings = {
+            "hi", "hello", "hey", "greetings", "good morning", "good afternoon", "good evening",
+            "how's it going", "how are you", "yo", "sup", "whats up", "what's up", "who are you",
+            "what is your name", "what do you do", "what can you do", "help", "who created you",
+            "thank you", "thanks", "bye", "goodbye"
+        }
+        if q in greetings:
+            return True
+        # If it's very short and matches greeting words without RAG keywords
+        words = q.split()
+        if len(words) <= 3 and any(w in greetings for w in words):
+            rag_keywords = {"policy", "document", "file", "leave", "pdf", "docx", "upload", "admission", "requirements"}
+            if not any(w in rag_keywords for w in words):
+                return True
+        return False
+
     def query(
         self,
         question: str,
         allowed_doc_ids: Optional[List[str]] = None,
         include_context: bool = True,
+        history: Optional[List[dict]] = None,
     ) -> Dict:
         """
         Answer question using RAG pipeline.
@@ -295,10 +375,12 @@ class RAGPipeline:
         start_time = time.time()
         logger.info(f"Processing query: {question[:50]}...")
 
+        is_conversational = self._is_conversational_query(question)
+
         try:
             # Retrieve relevant chunks (get 3x more if re-ranking is enabled)
             retrieval_start = time.time()
-            if self.index_built:
+            if self.index_built and not is_conversational:
                 fetch_k = (
                     self.retrieval_top_k * 3
                     if self.enable_reranking and self.reranker and self.reranker.is_loaded
@@ -326,25 +408,72 @@ class RAGPipeline:
 
             retrieval_time = (time.time() - retrieval_start) * 1000
 
-            # Extract citations and build context
+            # Calculate calibrated retrieval score
+            if is_conversational:
+                calibrated = 1.0
+            else:
+                if (
+                    self.enable_reranking
+                    and self.reranker
+                    and self.reranker.is_loaded
+                    and search_results
+                ):
+                    raw_score = search_results[0].hybrid_score
+                    calibrated = max(0.0, min(1.0, (raw_score + 5.0) / 10.0))
+                else:
+                    raw_cos_sim = (
+                        float(getattr(search_results[0], "raw_dense_score", 0.0))
+                        if search_results
+                        else 0.0
+                    )
+                    calibrated = max(0.0, (raw_cos_sim - 0.25) / 0.65)
+
+            # Web search fallback check
+            is_web_search = False
             citations = []
             context_chunks = []
             sources_set = set()
 
-            if not search_results:
-                logger.info("No relevant chunks found — falling back to conversational mode")
-                context = ""
-            else:
+            if not is_conversational and (not search_results or calibrated < 0.35):
+                logger.info(f"Low confidence ({calibrated:.2f}) or empty results. Triggering web search fallback...")
+                web_results = self.web_search_service.search(question, num_results=3)
+                if web_results:
+                    is_web_search = True
+                    calibrated = 0.5 # Web search default confidence
+                    for idx, res in enumerate(web_results, 1):
+                        chunk_id = f"web_{idx:04d}"
+                        link = res.get("link", "")
+                        title = res.get("title", "Web Page")
+                        snippet = res.get("snippet", "")
+                        chunk_text = f"Title: {title}\nSnippet: {snippet}"
+                        citations.append((chunk_id, link, chunk_text))
+                        context_chunks.append((chunk_text, 0.5, link))
+                        sources_set.add(link)
+
+            # If not web search and we have local search results, populate citations from local
+            if not is_web_search and search_results:
                 for result in search_results:
                     chunk_id = result.chunk_id
                     chunk_text = self.chunk_id_to_text.get(chunk_id, "")
 
                     # Get metadata
                     chunk_metadata = self.metadata_store.get_chunk(chunk_id)
-                    source_file = chunk_metadata.source_doc if chunk_metadata else "Unknown"
+                    source_file = "Unknown"
+                    if chunk_metadata and chunk_metadata.source_doc:
+                        source_file = chunk_metadata.source_doc
+                    else:
+                        parts = chunk_id.rsplit("_", 1)
+                        if parts:
+                            file_stem = parts[0]
+                            upload_dir = Path("uploaded_documents")
+                            if upload_dir.exists():
+                                for f in upload_dir.iterdir():
+                                    if f.is_file() and f.stem == file_stem:
+                                        source_file = str(f)
+                                        break
 
                     citations.append((chunk_id, source_file, chunk_text))
-                    context_chunks.append((chunk_text, result.hybrid_score))
+                    context_chunks.append((chunk_text, result.hybrid_score, source_file))
                     sources_set.add(Path(source_file).name)
 
             # Format context
@@ -367,9 +496,35 @@ class RAGPipeline:
 
             if self.llm.is_loaded:
                 try:
+                    # Format history if available (limit to last 5 turns to save context window)
+                    history_text = ""
+                    if history:
+                        recent_history = history[-5:]
+                        history_text = "Previous Conversation:\n" + "\n".join(
+                            f"{msg.get('role', 'unknown').capitalize()}: {msg.get('content', '')}"
+                            for msg in recent_history
+                        ) + "\n\n"
+
                     if context:
-                        # Create RAG prompt — explicitly ask for multi-source synthesis, but allow conversational greetings
-                        rag_prompt = f"""You are a helpful assistant answering questions based on the provided documents.
+                        if is_web_search:
+                            rag_prompt = f"""You are a helpful assistant answering questions based on the web search results below.
+
+Instructions:
+- Synthesize information from ALL relevant search results.
+- Give a comprehensive, detailed answer.
+- Cite the source URL when referencing specific facts (e.g. "According to [URL]...").
+- If the user is simply greeting you (e.g. "hi", "hello") or making general conversation, respond CONCISELY and politely without referencing search results. Keep greetings to 1-2 sentences max.
+- Otherwise, if the answer to the user's specific question is not in the context, say: "The information is not available in the search results."
+
+{history_text}Web Search Context:
+{context}
+
+Question: {question}
+
+Comprehensive Answer:"""
+                        else:
+                            # Create RAG prompt — explicitly ask for multi-source synthesis, but allow conversational greetings
+                            rag_prompt = f"""You are a helpful assistant answering questions based on the provided documents.
 
 Instructions:
 - Synthesize information from ALL relevant sections of the context below.
@@ -380,7 +535,7 @@ Instructions:
 - Otherwise, if the answer to the user's specific question is not in the context, say: "The information is not available in the uploaded documents."
 - Do NOT stop after finding the first relevant sentence — check all context sections.
 
-Context (from {len(search_results)} retrieved sections across uploaded documents):
+{history_text}Context (from {len(search_results)} retrieved sections across uploaded documents):
 {context}
 
 Question: {question}
@@ -393,7 +548,7 @@ The user is talking to you directly. Respond naturally to their greeting, pleasa
 Keep your response CONCISE (1-2 sentences). Do not ramble or over-explain.
 If they ask about documents, remind them they haven't uploaded any or that no relevant documents were found.
 
-User: {question}
+{history_text}User: {question}
 
 Assistant:"""
 
@@ -412,13 +567,22 @@ Assistant:"""
                 logger.info(
                     "Using retrieval-only mode — building answer from retrieved chunks"
                 )
-                top_chunks = [text for text, _ in context_chunks[:3]]
+                seen_chunks = set()
+                top_chunks = []
+                for chunk in context_chunks:
+                    text = chunk[0]
+                    trimmed = text.strip()
+                    if trimmed not in seen_chunks:
+                        seen_chunks.add(trimmed)
+                        top_chunks.append(trimmed)
+                top_chunks = top_chunks[:3]
+
                 if top_chunks:
                     # Present the most relevant passage(s) cleanly
                     answer = (
-                        f"Based on the uploaded documents, here is the most relevant information:\n\n"
+                        f"Based on the {'web search' if is_web_search else 'uploaded documents'}, here is the most relevant information:\n\n"
                         + "\n\n".join(
-                            f"• {chunk.strip()[:500]}" for chunk in top_chunks
+                            f"• {chunk[:500]}" for chunk in top_chunks
                         )
                     )
                 else:
@@ -435,24 +599,35 @@ Assistant:"""
             # Run claim-level verification when LLM produced a real answer
             # (skip in retrieval-only mode where answer IS the raw context)
             verified_confidence = None
-            if _VERIFICATION_AVAILABLE and self.llm.is_loaded:
+            if _VERIFICATION_AVAILABLE and self.llm.is_loaded and not is_conversational:
                 try:
                     verif_start = time.time()
 
-                    # Build Chunk objects from search results for the verifier
-                    verif_chunks = [
-                        VerifChunk(
-                            chunk_id=r.chunk_id,
-                            content=self.chunk_id_to_text.get(r.chunk_id, ""),
-                            source=Path(
-                                self.metadata_store.get_chunk(r.chunk_id).source_doc
-                                if self.metadata_store.get_chunk(r.chunk_id)
-                                else "unknown"
-                            ).name,
-                            relevance_score=r.hybrid_score,
-                        )
-                        for r in search_results
-                    ]
+                    # Build Chunk objects from search results/web search for the verifier
+                    if is_web_search:
+                        verif_chunks = [
+                            VerifChunk(
+                                chunk_id=cit[0],
+                                content=cit[2],
+                                source=cit[1],
+                                relevance_score=0.5,
+                            )
+                            for cit in citations
+                        ]
+                    else:
+                        verif_chunks = [
+                            VerifChunk(
+                                chunk_id=r.chunk_id,
+                                content=self.chunk_id_to_text.get(r.chunk_id, ""),
+                                source=Path(
+                                    self.metadata_store.get_chunk(r.chunk_id).source_doc
+                                    if self.metadata_store.get_chunk(r.chunk_id)
+                                    else "unknown"
+                                ).name,
+                                relevance_score=r.hybrid_score,
+                            )
+                            for r in search_results
+                        ]
 
                     # Split answer into individual claim sentences using LLM
                     splitter = LLMClaimSplitter(llm=self.llm)
@@ -470,7 +645,7 @@ Assistant:"""
                                 retrieval_scores=[
                                     ch.relevance_score for ch in verif_chunks
                                 ],
-                                retrieval_method="hybrid",
+                                retrieval_method="web_search" if is_web_search else "hybrid",
                                 num_retrieved=len(verif_chunks),
                             )
                             for claim in claim_objs
@@ -512,37 +687,17 @@ Assistant:"""
             # ── End verification ───────────────────────────────────────────────
 
             # ── Confidence score ──────────────────────────────────────────────
-            # Use the raw cosine similarity from FAISS (absolute range ~0.3–0.9)
-            # rather than the normalized hybrid rank score (always relative 0–1,
-            # bottoms out to 0 when only 1 chunk exists in the corpus).
-            # Use the raw cosine similarity from FAISS or the CrossEncoder logit
-            # to compute confidence.
-            if (
-                self.enable_reranking
-                and self.reranker
-                and self.reranker.is_loaded
-                and search_results
-            ):
-                # MS-MARCO CrossEncoder outputs logits where > 0 is good, > 5 is very good.
-                raw_score = search_results[0].hybrid_score
-                # Calibrate: 0 -> 50%, 5 -> 100%, -5 -> 0%
-                calibrated = max(0.0, min(1.0, (raw_score + 5.0) / 10.0))
+            if is_conversational:
+                confidence = 1.0
             else:
-                raw_cos_sim = (
-                    float(getattr(search_results[0], "raw_dense_score", 0.0))
-                    if search_results
-                    else 0.0
-                )
-                calibrated = max(0.0, (raw_cos_sim - 0.25) / 0.65)
+                if verified_confidence is not None and verified_confidence > 0:
+                    # Blend calibrated retrieval (60%) + verification (40%)
+                    confidence = 0.6 * calibrated + 0.4 * float(verified_confidence)
+                else:
+                    confidence = calibrated
 
-            if verified_confidence is not None and verified_confidence > 0:
-                # Blend calibrated retrieval (60%) + verification (40%)
-                confidence = 0.6 * calibrated + 0.4 * float(verified_confidence)
-            else:
-                confidence = calibrated
-
-            # Clamp to [0, 1]
-            confidence = max(0.0, min(1.0, confidence))
+                # Clamp to [0, 1]
+                confidence = max(0.0, min(1.0, confidence))
 
             total_latency = (time.time() - start_time) * 1000
 
@@ -566,40 +721,273 @@ Assistant:"""
 
         except Exception as e:
             logger.error(f"Query failed: {str(e)}")
-            raise RuntimeError(f"Query processing failed: {str(e)}")
+            raise RuntimeError(f"Pipeline query failed: {str(e)}")
+    def query_stream(
+        self,
+        question: str,
+        allowed_doc_ids: Optional[List[str]] = None,
+        include_context: bool = True,
+        history: Optional[List[dict]] = None,
+    ):
+        """
+        Stream answer using RAG pipeline.
+        Yields dictionaries with different event types:
+        - {"type": "metadata", "citations": [...], "sources": [...], "confidence": ...}
+        - {"type": "chunk", "content": "..."}
+        - {"type": "done", "latency_ms": ...}
+        """
+        import json
+        
+        if not question or not question.strip():
+            raise ValueError("Question cannot be empty")
 
-    def format_context(self, chunks: List[Tuple[str, float]]) -> str:
+        if not self.index_built:
+            logger.info("Pipeline index not built (no documents uploaded). Proceeding to conversational fallback.")
+
+        start_time = time.time()
+        logger.info(f"Processing query stream: {question[:50]}...")
+
+        is_conversational = self._is_conversational_query(question)
+
+        try:
+            # 1. Retrieve & Rerank (Synchronous)
+            retrieval_start = time.time()
+            if self.index_built and not is_conversational:
+                fetch_k = (
+                    self.retrieval_top_k * 3
+                    if self.enable_reranking and self.reranker and self.reranker.is_loaded
+                    else self.retrieval_top_k
+                )
+                search_results = self.retriever.search(
+                    question, top_k=fetch_k, allowed_doc_ids=allowed_doc_ids
+                )
+            else:
+                search_results = []
+
+            if self.enable_reranking and self.reranker and self.reranker.is_loaded and search_results:
+                search_results = self.reranker.rerank(
+                    query=question,
+                    results=search_results,
+                    chunk_texts=self.chunk_id_to_text,
+                    top_k=self.retrieval_top_k,
+                )
+
+            retrieval_time = (time.time() - retrieval_start) * 1000
+
+            # Calculate calibrated confidence score
+            if is_conversational:
+                confidence_score = 1.0
+            else:
+                if (
+                    self.enable_reranking
+                    and self.reranker
+                    and self.reranker.is_loaded
+                    and search_results
+                ):
+                    raw_score = search_results[0].hybrid_score
+                    confidence_score = max(0.0, min(1.0, (raw_score + 5.0) / 10.0))
+                else:
+                    raw_cos_sim = (
+                        float(getattr(search_results[0], "raw_dense_score", 0.0))
+                        if search_results
+                        else 0.0
+                    )
+                    confidence_score = max(0.0, min(1.0, (raw_cos_sim - 0.25) / 0.65))
+
+            # Web search fallback check
+            is_web_search = False
+            citations = []
+            context_chunks = []
+            sources_set = set()
+
+            if not is_conversational and (not search_results or confidence_score < 0.35):
+                logger.info(f"Low confidence ({confidence_score:.2f}) or empty results. Triggering web search fallback...")
+                web_results = self.web_search_service.search(question, num_results=3)
+                if web_results:
+                    is_web_search = True
+                    confidence_score = 0.5 # Web search default confidence
+                    for idx, res in enumerate(web_results, 1):
+                        chunk_id = f"web_{idx:04d}"
+                        link = res.get("link", "")
+                        title = res.get("title", "Web Page")
+                        snippet = res.get("snippet", "")
+                        chunk_text = f"Title: {title}\nSnippet: {snippet}"
+                        citations.append((chunk_id, link, chunk_text))
+                        context_chunks.append((chunk_text, 0.5, link))
+                        sources_set.add(link)
+
+            # If not web search and we have local search results, populate citations from local
+            if not is_web_search and search_results:
+                for result in search_results:
+                    chunk_id = result.chunk_id
+                    chunk_text = self.chunk_id_to_text.get(chunk_id, "")
+
+                    # Get metadata
+                    chunk_metadata = self.metadata_store.get_chunk(chunk_id)
+                    source_file = "Unknown"
+                    if chunk_metadata and chunk_metadata.source_doc:
+                        source_file = chunk_metadata.source_doc
+                    else:
+                        parts = chunk_id.rsplit("_", 1)
+                        if parts:
+                            file_stem = parts[0]
+                            upload_dir = Path("uploaded_documents")
+                            if upload_dir.exists():
+                                for f in upload_dir.iterdir():
+                                    if f.is_file() and f.stem == file_stem:
+                                        source_file = str(f)
+                                        break
+
+                    citations.append((chunk_id, source_file, chunk_text))
+                    context_chunks.append((chunk_text, result.hybrid_score, source_file))
+                    sources_set.add(Path(source_file).name)
+
+            context = self.format_context(context_chunks)
+
+            # Yield metadata event immediately before generation starts
+            yield {
+                "type": "metadata",
+                "citations": citations,
+                "sources": list(sources_set),
+                "confidence": confidence_score,
+                "retrieval_latency_ms": retrieval_time
+            }
+
+            # 2. Format Prompt & Stream Generation
+            generation_start = time.time()
+
+            if not self.llm.is_loaded:
+                try:
+                    self.llm.load_model()
+                except Exception:
+                    pass
+
+            # Format history
+            history_text = ""
+            if history:
+                recent_history = history[-5:]
+                history_text = "Previous Conversation:\n" + "\n".join(
+                    f"{msg.get('role', 'unknown').capitalize()}: {msg.get('content', '')}"
+                    for msg in recent_history
+                ) + "\n\n"
+
+            answer = ""
+            if self.llm.is_loaded:
+                try:
+                    if context:
+                        if is_web_search:
+                            rag_prompt = f"""You are a helpful assistant answering questions based on the web search results below.
+
+Instructions:
+- Synthesize information from ALL relevant search results.
+- Give a comprehensive, detailed answer.
+- Cite the source URL when referencing specific facts (e.g. "According to [URL]...").
+- If the user is simply greeting you (e.g. "hi", "hello") or making general conversation, respond CONCISELY and politely without referencing search results. Keep greetings to 1-2 sentences max.
+- Otherwise, if the answer to the user's specific question is not in the context, say: "The information is not available in the search results."
+
+{history_text}Web Search Context:
+{context}
+
+Question: {question}
+
+Comprehensive Answer:"""
+                        else:
+                            rag_prompt = f"""You are a helpful assistant answering questions based on the provided documents.
+
+Instructions:
+- Synthesize information from ALL relevant sections of the context below.
+- Give a comprehensive, detailed answer covering all relevant points found.
+- If information comes from multiple documents, combine it into a single coherent answer.
+- Cite the source document name when referencing specific facts (e.g. "According to [filename]...").
+- If the user is simply greeting you (e.g. "hi", "hello") or making general conversation, respond CONCISELY and politely without referencing the documents. Keep greetings to 1-2 sentences max.
+- Otherwise, if the answer to the user's specific question is not in the context, say: "The information is not available in the uploaded documents."
+
+{history_text}Context (from {len(search_results)} retrieved sections across uploaded documents):
+{context}
+
+Question: {question}
+
+Comprehensive Answer:"""
+                    else:
+                        rag_prompt = f"""You are a helpful, polite, and intelligent AI assistant. 
+The user is talking to you directly. Respond naturally to their greeting, pleasantry, or general question. 
+Keep your response CONCISE (1-2 sentences). Do not ramble or over-explain.
+
+{history_text}User: {question}
+
+Assistant:"""
+
+                    # Stream LLM tokens
+                    for chunk in self.llm.generate_stream(rag_prompt, max_tokens=1024):
+                        answer += chunk
+                        yield {"type": "chunk", "content": chunk}
+                        
+                except Exception as e:
+                    logger.warning(f"LLM streaming failed: {e}")
+                    yield {"type": "error", "content": f"LLM streaming failed: {e}"}
+            
+            # If answer is still empty (LLM offline or failed)
+            if not answer:
+                seen_chunks = set()
+                top_chunks = []
+                for chunk in context_chunks:
+                    text = chunk[0]
+                    trimmed = text.strip()
+                    if trimmed not in seen_chunks:
+                        seen_chunks.add(trimmed)
+                        top_chunks.append(trimmed)
+                top_chunks = top_chunks[:3]
+
+                if top_chunks:
+                    fallback = (
+                        f"Based on the {'web search' if is_web_search else 'uploaded documents'}, here is the most relevant information:\n\n"
+                        + "\n\n".join(f"• {chunk[:500]}" for chunk in top_chunks)
+                    )
+                else:
+                    lower_q = question.lower().strip()
+                    if lower_q in ["hi", "hello", "hey", "how are you", "who are you"]:
+                        fallback = "Hello! I am SecureHall-RAG. I can help you answer questions about your documents."
+                    else:
+                        fallback = "No relevant information found in the knowledge base."
+                yield {"type": "chunk", "content": fallback}
+
+            generation_time = (time.time() - generation_start) * 1000
+
+            # Yield done event
+            yield {
+                "type": "done",
+                "latency_ms": (time.time() - start_time) * 1000,
+                "generation_latency_ms": generation_time
+            }
+
+        except Exception as e:
+            logger.error(f"Stream query failed: {str(e)}")
+            yield {"type": "error", "content": f"Stream failed: {str(e)}"}
+
+    def format_context(self, chunks: List[Tuple]) -> str:
         """
         Format retrieved chunks into context for LLM.
 
         Args:
-            chunks: List of (chunk_text, relevance_score) tuples
+            chunks: List of (chunk_text, relevance_score) or (chunk_text, relevance_score, source) tuples
 
         Returns:
             Formatted context string with citations and scores
-
-        Implementation:
-        - Create numbered context blocks
-        - Include relevance scores
-        - Format for clarity
-
-        Example output:
-        ```
-        [1] (Relevance: 0.92)
-        All employees must follow the Code of Conduct...
-
-        [2] (Relevance: 0.87)
-        Leave requests must be submitted 30 days in advance...
-        ```
         """
         if not chunks:
             return "No relevant context available."
 
         context_lines = []
-        for i, (text, score) in enumerate(chunks, 1):
+        for i, chunk in enumerate(chunks, 1):
+            if len(chunk) == 3:
+                text, score, source = chunk
+                source_display = f"Source: {Path(source).name if not (source.startswith('http://') or source.startswith('https://')) else source}, "
+            else:
+                text, score = chunk[0], chunk[1]
+                source_display = ""
             # Truncate very long texts
-            display_text = text[:300] + "..." if len(text) > 300 else text
-            context_lines.append(f"[{i}] (Relevance: {score:.2f})\n{display_text}\n")
+            display_text = text[:800] + "..." if len(text) > 800 else text
+            context_lines.append(f"[{i}] ({source_display}Relevance Score: {score:.2f})\n{display_text}\n")
 
         return "\n".join(context_lines)
 
@@ -617,6 +1005,205 @@ Assistant:"""
             "retriever_stats": self.retriever.get_statistics(),
             "llm_stats": self.llm.get_model_info(),
         }
+
+    def persist(self) -> None:
+        """
+        Save the current index state to disk so documents survive server restarts.
+
+        Saves:
+        - FAISS dense embeddings + metadata
+        - BM25 sparse index
+        - chunk_id_to_text mapping (needed for citation generation)
+        - corpus texts and chunk_ids
+        - metadata store
+        """
+        if not self.data_dir:
+            logger.warning("No data_dir configured — skipping persistence.")
+            return
+
+        if not self.index_built:
+            logger.warning("Index not built yet — nothing to persist.")
+            return
+
+        import json
+
+        data_path = Path(self.data_dir)
+        data_path.mkdir(parents=True, exist_ok=True)
+
+        # Save retriever indices (FAISS + BM25)
+        self.retriever.save_indices(str(data_path / "indices"))
+
+        # Save chunk_id_to_text mapping (needed for citations on reload)
+        with open(data_path / "chunk_id_to_text.json", "w", encoding="utf-8") as f:
+            json.dump(self.chunk_id_to_text, f, ensure_ascii=False, indent=2)
+
+        # Save metadata store
+        self.metadata_store.export_metadata(str(data_path / "metadata_store.json"))
+
+        # Save corpus state
+        corpus_state = {
+            "corpus_texts": self._corpus_texts,
+            "corpus_chunk_ids": self._corpus_chunk_ids,
+            "total_chunks": self.total_chunks,
+        }
+        with open(data_path / "corpus_state.json", "w", encoding="utf-8") as f:
+            json.dump(corpus_state, f, ensure_ascii=False, indent=2)
+
+        logger.info(
+            f"✅ Persisted pipeline state to {data_path} "
+            f"({self.total_chunks} chunks)"
+        )
+
+    def _load_persisted_state(self) -> None:
+        """
+        Attempt to load previously saved indices and corpus state from disk.
+        Called automatically during __init__ when data_dir is set.
+        """
+        import json
+
+        data_path = Path(self.data_dir)
+        indices_path = data_path / "indices"
+        chunk_map_path = data_path / "chunk_id_to_text.json"
+        corpus_state_path = data_path / "corpus_state.json"
+        metadata_store_path = data_path / "metadata_store.json"
+
+        # Check if persisted state exists
+        if not indices_path.exists() or not chunk_map_path.exists():
+            logger.info("No persisted state found — starting with empty index.")
+            return
+
+        try:
+            # Load retriever indices
+            loaded = self.retriever.load_indices(str(indices_path))
+            if not loaded:
+                return
+
+            # Load chunk_id_to_text mapping
+            with open(chunk_map_path, "r", encoding="utf-8") as f:
+                self.chunk_id_to_text = json.load(f)
+
+            # Load metadata store if exists
+            if metadata_store_path.exists():
+                self.metadata_store.import_metadata(str(metadata_store_path))
+
+            # Load corpus state
+            if corpus_state_path.exists():
+                with open(corpus_state_path, "r", encoding="utf-8") as f:
+                    corpus_state = json.load(f)
+                loaded_texts = corpus_state.get("corpus_texts", [])
+                loaded_chunk_ids = corpus_state.get("corpus_chunk_ids", [])
+                
+                # 1. Deduplicate by chunk_id
+                seen_cids = set()
+                unique_texts = []
+                unique_chunk_ids = []
+                for cid, txt in zip(loaded_chunk_ids, loaded_texts):
+                    if cid not in seen_cids:
+                        seen_cids.add(cid)
+                        unique_chunk_ids.append(cid)
+                        unique_texts.append(txt)
+                
+                # 2. Clean up orphan chunks whose documents no longer exist on disk
+                upload_dir = Path("uploaded_documents")
+                valid_doc_ids = set()
+                if upload_dir.exists():
+                    for f_path in upload_dir.iterdir():
+                        if f_path.is_file():
+                            parts = f_path.name.split("_", 1)
+                            if parts:
+                                valid_doc_ids.add(parts[0])
+                
+                self._corpus_texts = []
+                self._corpus_chunk_ids = []
+                for cid, txt in zip(unique_chunk_ids, unique_texts):
+                    parts = cid.split("_", 1)
+                    if parts and parts[0] in valid_doc_ids:
+                        self._corpus_chunk_ids.append(cid)
+                        self._corpus_texts.append(txt)
+                    else:
+                        logger.info(f"Removing orphan chunk {cid} from index (document no longer exists).")
+                
+                self.total_chunks = len(self._corpus_chunk_ids)
+                
+                # Rebuild and persist if changes occurred
+                if len(self._corpus_chunk_ids) < len(loaded_chunk_ids):
+                    logger.info(f"Cleaned corpus (removed duplicates/orphans): {len(loaded_chunk_ids)} -> {len(self._corpus_chunk_ids)} chunks. Rebuilding index...")
+                    self.retriever.build_index(self._corpus_texts, self._corpus_chunk_ids)
+                    self.persist()
+
+            self.index_built = True
+
+            logger.info(
+                f"✅ Restored persisted pipeline state: "
+                f"{self.total_chunks} chunks from {data_path}"
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to load persisted state: {e} — starting fresh.")
+            self.index_built = False
+
+    def delete_document(self, doc_id: str) -> bool:
+        """
+        Delete a document's chunks from the RAG pipeline index and persist the changes.
+        """
+        prefix = f"{doc_id}_"
+        
+        # Filter _corpus_chunk_ids and parallel _corpus_texts
+        filtered_corpus = [
+            (cid, txt) for cid, txt in zip(self._corpus_chunk_ids, self._corpus_texts)
+            if not cid.startswith(prefix)
+        ]
+        
+        removed_count = len(self._corpus_chunk_ids) - len(filtered_corpus)
+        if removed_count > 0:
+            logger.info(f"Removing {removed_count} chunks for document ID {doc_id} from RAG index.")
+            self._corpus_chunk_ids = [item[0] for item in filtered_corpus]
+            self._corpus_texts = [item[1] for item in filtered_corpus]
+            
+            # Clean in-memory chunk map
+            for cid in list(self.chunk_id_to_text.keys()):
+                if cid.startswith(prefix):
+                    del self.chunk_id_to_text[cid]
+                    
+            # Clean in-memory metadata store
+            for cid in list(self.metadata_store.chunk_metadata.keys()):
+                if cid.startswith(prefix):
+                    del self.metadata_store.chunk_metadata[cid]
+                    
+            for doc_key in list(self.metadata_store.document_metadata.keys()):
+                if doc_key.startswith(prefix) or doc_key == doc_id:
+                    del self.metadata_store.document_metadata[doc_key]
+                    
+            # Clean SQLite DB tables (if persistent)
+            if self.metadata_store.db_path:
+                import sqlite3
+                try:
+                    conn = sqlite3.connect(str(self.metadata_store.db_path))
+                    cursor = conn.cursor()
+                    cursor.execute("DELETE FROM chunks WHERE chunk_id LIKE ?", (f"{prefix}%",))
+                    cursor.execute("DELETE FROM documents WHERE source_doc LIKE ?", (f"{prefix}%",))
+                    conn.commit()
+                    conn.close()
+                except Exception as db_err:
+                    logger.warning(f"Failed to delete metadata from database: {db_err}")
+            
+            # Rebuild retriever index and save
+            if self._corpus_chunk_ids:
+                self.retriever.build_index(self._corpus_texts, self._corpus_chunk_ids)
+                self.index_built = True
+            else:
+                # Index is now completely empty
+                self.retriever.embeddings = None
+                self.retriever.chunk_ids = []
+                self.retriever.texts = []
+                self.retriever._faiss_index = None
+                self.index_built = False
+                
+            self.total_chunks = len(self._corpus_chunk_ids)
+            self.persist()
+            return True
+            
+        return False
 
 
 if __name__ == "__main__":

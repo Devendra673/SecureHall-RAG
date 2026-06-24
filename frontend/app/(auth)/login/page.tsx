@@ -149,16 +149,6 @@ export default function LoginPage() {
               Create one
             </Link>
           </p>
-
-          {/* Admin hint */}
-          <div className="p-4 bg-muted/30 rounded-xl border border-border/40 text-center space-y-1">
-            <p className="text-xs text-muted-foreground font-medium">Default admin credentials</p>
-            <p className="text-sm">
-              <span className="font-mono text-foreground/80">admin@securehall.local</span>
-              {' / '}
-              <span className="font-mono text-foreground/80">Admin@123</span>
-            </p>
-          </div>
         </div>
       </motion.div>
     </div>

@@ -18,11 +18,14 @@ from fastapi import (
     Form,
     HTTPException,
     Query,
+    Request,
     UploadFile,
 )
 from sqlalchemy.orm import Session
+import re
 
 from ..core.config import settings
+from ..core.limiter import limiter
 from ..models.schemas import (
     DocumentDeleteResponse,
     DocumentListResponse,
@@ -63,6 +66,53 @@ def get_accessible_doc_ids(db: Session, user_role: str) -> Optional[list[str]]:
     return [r.document_id for r in rows if r.access_level in allowed_levels]
 
 
+def _sync_documents_from_db(db: Session):
+    """Repopulate the in-memory _documents dict from persistent database and disk state."""
+    global _documents
+    
+    # Query all document access records
+    rows = db.query(DocumentAccess).all()
+    upload_dir = _get_upload_dir()
+    pipeline = get_pipeline()
+    
+    for row in rows:
+        if row.document_id in _documents:
+            continue
+            
+        # Sanitize filename to find the file on disk
+        safe_filename = re.sub(r'[^a-zA-Z0-9_.-]', '_', row.filename or "unknown")
+        safe_filename = re.sub(r'\.{2,}', '.', safe_filename).lstrip('.')
+        file_path = upload_dir / f"{row.document_id}_{safe_filename}"
+        
+        if not file_path.exists():
+            # Check any file starting with doc_id_
+            found_paths = list(upload_dir.glob(f"{row.document_id}_*"))
+            if found_paths:
+                file_path = found_paths[0]
+            else:
+                continue
+                
+        # Calculate chunk count from pipeline
+        chunk_count = 0
+        status = "ready"
+        if pipeline:
+            prefix = f"{file_path.stem}_"
+            chunk_count = sum(1 for cid in pipeline.chunk_id_to_text.keys() if cid.startswith(prefix))
+            if chunk_count == 0:
+                status = "processing"
+                
+        # Populate _documents
+        _documents[row.document_id] = DocumentSchema(
+            doc_id=row.document_id,
+            filename=row.filename,
+            file_size_bytes=file_path.stat().st_size if file_path.exists() else 0,
+            file_type=Path(row.filename).suffix.lower(),
+            upload_timestamp=row.created_at or datetime.utcnow(),
+            chunk_count=chunk_count,
+            status=status,
+        )
+
+
 def _get_upload_dir() -> Path:
     """Ensure and return the upload directory path."""
     upload_dir = Path(settings.UPLOAD_DIR)
@@ -92,6 +142,12 @@ def _ingest_document_background(doc_id: str, file_path: str):
                 update={"status": "ready", "chunk_count": chunk_count}
             )
         logger.info(f"Ingestion complete for {doc_id}: {chunk_count} chunks")
+
+        # Persist indices to disk so documents survive server restarts
+        try:
+            pipeline.persist()
+        except Exception as persist_exc:
+            logger.warning(f"Index persistence failed (non-fatal): {persist_exc}")
     except Exception as exc:
         logger.error(f"Ingestion failed for {doc_id}: {exc}")
         if doc_id in _documents:
@@ -114,7 +170,9 @@ def _ingest_document_background(doc_id: str, file_path: str):
         500: {"description": "Upload processing failed"},
     },
 )
+@limiter.limit("10/minute")
 async def upload_document(
+    request: Request,
     background_tasks: BackgroundTasks,
     file: UploadFile = File(..., description="The document file to upload."),
     access_level: str = Form(
@@ -237,6 +295,7 @@ async def list_documents(
     current_user: User = Depends(get_current_user),
 ):
     """Return documents visible to the current user based on their role."""
+    _sync_documents_from_db(db)
     user_role = current_user.role
     accessible = get_accessible_doc_ids(db, user_role)
     docs = [
@@ -261,6 +320,7 @@ async def get_document(
     current_user: User = Depends(get_current_user),
 ):
     """Get a single document by ID — enforces access control."""
+    _sync_documents_from_db(db)
     if doc_id not in _documents:
         raise HTTPException(status_code=404, detail=f"Document '{doc_id}' not found.")
     user_role = current_user.role
@@ -283,12 +343,28 @@ async def delete_document(
     current_user: Optional[User] = Depends(require_hr_admin),
 ):
     """Delete a document (HR/Admin only)."""
+    _sync_documents_from_db(db)
     if doc_id not in _documents:
         raise HTTPException(status_code=404, detail=f"Document '{doc_id}' not found.")
 
     doc = _documents.pop(doc_id)
 
-    # Clean up file from disk
+    # 1. Clean up from RAG pipeline index
+    pipeline = get_pipeline()
+    if pipeline:
+        try:
+            pipeline.delete_document(doc_id)
+        except Exception as e:
+            logger.warning(f"Failed to delete document {doc_id} from RAG pipeline: {e}")
+
+    # 2. Delete access permissions from DB table
+    try:
+        db.query(DocumentAccess).filter(DocumentAccess.document_id == doc_id).delete()
+        db.commit()
+    except Exception as e:
+        logger.warning(f"Failed to delete DocumentAccess record for {doc_id}: {e}")
+
+    # 3. Clean up file from disk
     upload_dir = _get_upload_dir()
     for file_path in upload_dir.glob(f"{doc_id}_*"):
         try:

@@ -80,6 +80,11 @@ async def lifespan(app: FastAPI):
 # ─────────────────────────────────────────────────────────────────────────────
 # FastAPI App  (5B.2.1, 5B.2.6)
 # ─────────────────────────────────────────────────────────────────────────────
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+
+from .core.limiter import limiter
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
@@ -121,10 +126,14 @@ app = FastAPI(
         {"name": "Settings", "description": "User preferences and configuration."},
     ],
 )
+# Register rate limiter and its exception handler
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CORS Middleware  (5B.2.2)
+# CORS Middleware  
 # ─────────────────────────────────────────────────────────────────────────────
 
 app.add_middleware(

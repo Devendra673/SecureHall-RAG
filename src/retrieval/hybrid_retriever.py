@@ -305,6 +305,95 @@ class HybridRetriever:
 
         return results
 
+    def save_indices(self, dir_path: str) -> None:
+        """
+        Save both dense and sparse indices to the given directory.
+
+        Args:
+            dir_path: Directory path where index files will be saved.
+        """
+        from pathlib import Path
+
+        dir_path = Path(dir_path)
+        dir_path.mkdir(parents=True, exist_ok=True)
+
+        # Save dense index (embeddings + metadata)
+        self.dense_retriever.save_index(
+            index_path=str(dir_path / "dense_embeddings.npy"),
+            metadata_path=str(dir_path / "dense_metadata.json"),
+        )
+
+        # Save sparse index (BM25 pickle)
+        self.bm25_retriever.save_index(
+            index_path=str(dir_path / "bm25_index.pkl"),
+        )
+
+        # Save hybrid-level metadata (texts, chunk_ids)
+        import json
+
+        hybrid_meta = {
+            "chunk_ids": self.chunk_ids,
+            "texts": self.texts,
+            "dense_weight": self.dense_weight,
+            "sparse_weight": self.sparse_weight,
+        }
+        with open(dir_path / "hybrid_meta.json", "w", encoding="utf-8") as f:
+            json.dump(hybrid_meta, f, ensure_ascii=False, indent=2)
+
+        logger.info(f"Saved hybrid indices to {dir_path}")
+
+    def load_indices(self, dir_path: str) -> bool:
+        """
+        Load both dense and sparse indices from the given directory.
+
+        Args:
+            dir_path: Directory path containing previously saved index files.
+
+        Returns:
+            True if indices were loaded successfully, False otherwise.
+        """
+        from pathlib import Path
+        import json
+
+        dir_path = Path(dir_path)
+
+        dense_emb = dir_path / "dense_embeddings.npy"
+        dense_meta = dir_path / "dense_metadata.json"
+        bm25_idx = dir_path / "bm25_index.pkl"
+        hybrid_meta_path = dir_path / "hybrid_meta.json"
+
+        # Check that all required files exist
+        if not all(p.exists() for p in [dense_emb, dense_meta, bm25_idx, hybrid_meta_path]):
+            logger.info(f"No saved indices found in {dir_path} — starting fresh.")
+            return False
+
+        try:
+            # Load dense index
+            self.dense_retriever.load_index(
+                index_path=str(dense_emb),
+                metadata_path=str(dense_meta),
+            )
+
+            # Load sparse index
+            self.bm25_retriever.load_index(index_path=str(bm25_idx))
+
+            # Load hybrid metadata
+            with open(hybrid_meta_path, "r", encoding="utf-8") as f:
+                hybrid_meta = json.load(f)
+
+            self.chunk_ids = hybrid_meta["chunk_ids"]
+            self.texts = hybrid_meta["texts"]
+
+            logger.info(
+                f"Loaded hybrid indices from {dir_path}: "
+                f"{len(self.chunk_ids)} chunks"
+            )
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to load indices from {dir_path}: {e}")
+            return False
+
     def get_statistics(self) -> Dict:
         """Get retriever statistics"""
         return {

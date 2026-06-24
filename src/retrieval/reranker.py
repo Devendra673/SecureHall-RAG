@@ -30,24 +30,25 @@ class CrossEncoderReRanker:
     which is why we only re-rank the top K candidate chunks.
     """
 
-    def __init__(self, model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"):
+    def __init__(self, model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2", device: str = "cpu"):
         """
         Initialize the CrossEncoder model.
 
         Args:
             model_name: HuggingFace model identifier. Defaults to a fast MS-MARCO model.
+            device: Device to run the model on ("cpu", "cuda"). Defaults to "cpu".
         """
         self.model_name = model_name
         self.model = None
 
         if CrossEncoder is not None:
             try:
-                logger.info(f"Loading CrossEncoder model: {model_name}")
+                logger.info(f"Loading CrossEncoder model: {model_name} on {device}")
                 start_time = time.time()
-                self.model = CrossEncoder(model_name, max_length=512)
+                self.model = CrossEncoder(model_name, max_length=512, device=device)
                 logger.info(f"Loaded CrossEncoder in {time.time() - start_time:.2f}s")
             except Exception as e:
-                logger.error(f"Failed to load CrossEncoder model {model_name}: {e}")
+                logger.error(f"Failed to load CrossEncoder model {model_name} on {device}: {e}")
         else:
             logger.warning("sentence-transformers not installed. Re-ranking disabled.")
 

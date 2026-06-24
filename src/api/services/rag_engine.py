@@ -45,6 +45,7 @@ def get_pipeline():
             temperature=settings.LLM_TEMPERATURE,
             reranker_model=settings.RERANKER_MODEL,
             enable_reranking=settings.ENABLE_RERANKING,
+            data_dir="app_data",
         )
         _init_error = None
         logger.info("✅ RAG pipeline initialised successfully.")

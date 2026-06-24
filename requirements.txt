@@ -18,11 +18,12 @@ nltk>=3.8.1
 python-docx>=0.8.11
 PyPDF2>=3.0.0
 
-# Web frameworks (Phase 5B)
+# Web frameworks 
 fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
 pydantic>=2.0.0
 python-multipart>=0.0.6
+slowapi>=0.1.9
 
 # Utilities
 python-dotenv>=1.0.0
@@ -39,3 +40,13 @@ mypy>=1.0.0
 
 # Data handling (optional)
 # pandas>=2.0.0
+
+# Web Search Fallback 
+ddgs>=9.14.0
+requests>=2.31.0
+
+# Database & Authentication
+SQLAlchemy>=2.0.0
+passlib[bcrypt]>=1.7.4
+python-jose[cryptography]>=3.3.0
+

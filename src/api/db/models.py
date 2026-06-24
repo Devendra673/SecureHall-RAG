@@ -6,6 +6,7 @@ Uses SQLite by default (database.db in project root).
 
 from __future__ import annotations
 
+import os
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -26,7 +27,7 @@ from sqlalchemy.orm import DeclarativeBase, Session, relationship, sessionmaker
 
 # ── Database path ─────────────────────────────────────────────────────────────
 DB_PATH = Path(__file__).parent.parent.parent.parent / "database.db"
-DATABASE_URL = f"sqlite:///{DB_PATH}"
+DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{DB_PATH}")
 
 engine = create_engine(
     DATABASE_URL,
@@ -138,6 +139,10 @@ class ChatMessage(Base):
     role = Column(Enum("user", "assistant", name="message_role"), nullable=False)
     content = Column(Text, nullable=False)
     confidence = Column(Integer, nullable=True)  # 0-100 for assistant messages
+    citations_json = Column(Text, nullable=True, default="[]")
+    sources_json = Column(Text, nullable=True, default="[]")
+    hallucination_risk = Column(String(50), nullable=True, default="unknown")
+    latency_ms = Column(Integer, nullable=True, default=0)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     # Relationships
@@ -249,9 +254,35 @@ class QueryHistory(Base):
 
 # ── DB Initialisation ────────────────────────────────────────────────────────
 def init_db() -> None:
-    """Create all tables and seed a default admin user if none exists."""
-    # Force reload
+    """Create all tables, migrate schemas if needed, and seed a default admin user."""
+    # Force reload/creation of tables
     Base.metadata.create_all(bind=engine)
+
+    # Migrate chat_messages table (add columns added in session history Phase 10)
+    with engine.begin() as conn:
+        result = conn.exec_driver_sql("PRAGMA table_info(chat_messages)").fetchall()
+        existing_cols = {row[1] for row in result}
+        
+        missing_columns = {
+            "citations_json": "TEXT NULL",
+            "sources_json": "TEXT NULL",
+            "hallucination_risk": "VARCHAR(50) NULL",
+            "latency_ms": "INTEGER NULL DEFAULT 0"
+        }
+        
+        for col_name, col_type in missing_columns.items():
+            if col_name not in existing_cols:
+                try:
+                    conn.exec_driver_sql(f"ALTER TABLE chat_messages ADD COLUMN {col_name} {col_type}")
+                    import logging
+                    logging.getLogger("securehall-rag").info(
+                        f"Migration: Added missing column '{col_name}' to chat_messages table."
+                    )
+                except Exception as alter_err:
+                    import logging
+                    logging.getLogger("securehall-rag").error(
+                        f"Migration failed to add column '{col_name}': {alter_err}"
+                    )
 
     # Seed default admin
     with SessionLocal() as db:

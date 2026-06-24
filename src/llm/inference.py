@@ -250,6 +250,49 @@ class LLMInference:
             logger.error(f"Generation failed: {str(e)}")
             raise RuntimeError(f"LLM generation failed: {str(e)}")
 
+    def generate_stream(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        max_tokens: Optional[int] = None,
+    ):
+        """
+        Stream response from prompt. Yields response tokens as they arrive.
+        """
+        if not self.is_loaded:
+            raise RuntimeError("Model not loaded. Call load_model() first.")
+
+        if not prompt or not prompt.strip():
+            raise ValueError("Prompt cannot be empty")
+
+        try:
+            if system_prompt:
+                formatted_prompt = f"{system_prompt}\n\n{prompt}"
+            else:
+                formatted_prompt = prompt
+
+            response = ollama.generate(
+                model=self.model_name,
+                prompt=formatted_prompt,
+                stream=True,
+                options={
+                    "temperature": self.temperature,
+                    "top_p": self.top_p,
+                    "top_k": self.top_k,
+                    "num_predict": max_tokens or self.max_tokens,
+                },
+            )
+            
+            for chunk in response:
+                if hasattr(chunk, "response"):
+                    yield chunk.response
+                else:
+                    yield chunk.get("response", "")
+
+        except Exception as e:
+            logger.error(f"Streaming generation failed: {str(e)}")
+            raise RuntimeError(f"LLM streaming failed: {str(e)}")
+
     def generate_with_context(
         self, query: str, context: str, max_tokens: Optional[int] = None
     ) -> str:

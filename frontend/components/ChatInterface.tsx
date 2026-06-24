@@ -59,7 +59,7 @@ function downloadBlob(content: string, mime: string, filename: string) {
 // ─────────────────────────────────────────────────────────
 
 export function ChatInterface() {
-  const { messages, isThinking, addMessage, updateMessage, setThinking } =
+  const { activeSessionId, setActiveSessionId, messages, isThinking, addMessage, updateMessage, setThinking } =
     useChatStore();
   const { theme, setTheme } = useTheme();
   const [mounted, setMounted] = useState(false);
@@ -209,42 +209,57 @@ export function ChatInterface() {
       timestamp: new Date(),
     });
 
+    // Prepare history payload from existing messages (before we add the new user query to the local store)
+    const historyPayload = messages.map((m) => ({
+      role: m.role,
+      content: m.content,
+    }));
+
     try {
-      const response = await ApiService.submitQuery({ query });
-
-      // Store the real backend answer_id against our local message id
-      metaMap.set(localMsgId, { answerId: response.answer_id });
-
-      // Typewriter animation
-      const full = response.answer;
-      let i = 0;
-      const tick = setInterval(() => {
-        i = Math.min(i + 5, full.length);
-        if (i >= full.length) {
-          clearInterval(tick);
+      let accumulatedText = "";
+      
+      await ApiService.submitQueryStream(
+        { query, session_id: activeSessionId || undefined, history: historyPayload },
+        // onMetadata
+        (metadata) => {
           updateMessage(localMsgId, {
-            content: full,
-            confidence: response.confidence,
-            citations: response.citations as unknown as Citation[],
+            confidence: metadata.confidence,
+            citations: metadata.citations as unknown as Citation[],
           });
-        } else {
-          updateMessage(localMsgId, { content: full.slice(0, i) + "▌" });
+        },
+        // onChunk
+        (textChunk) => {
+          accumulatedText += textChunk;
+          updateMessage(localMsgId, { content: accumulatedText + "▌" });
+        },
+        // onDone
+        (answerId?: string, sessionId?: string) => {
+          if (answerId) {
+            metaMap.set(localMsgId, { answerId });
+          }
+          if (sessionId && !activeSessionId) {
+            setActiveSessionId(sessionId);
+          }
+          updateMessage(localMsgId, { content: accumulatedText });
+          window.dispatchEvent(new CustomEvent("rag:history-updated"));
+          setThinking(false);
+        },
+        // onError
+        (err) => {
+          const msg = err.message || "Query failed. Is the backend running?";
+          toast.error(msg);
+          updateMessage(localMsgId, { content: `⚠️ ${msg}` });
+          setThinking(false);
         }
-      }, 16);
+      );
 
-      // Signal sidebar to refresh history after typewriter finishes
-      setTimeout(() => {
-        window.dispatchEvent(new CustomEvent("rag:history-updated"));
-      }, Math.ceil((full.length / 5) * 16) + 100);
+      // The backend answer_id isn't returned immediately in the stream right now, 
+      // but if we updated the SSE endpoint to return it in the done event, we could set it.
+      // For now, feedback might not work perfectly until we refresh or inject the answer_id.
     } catch (err: unknown) {
-      const msg =
-        err instanceof Error
-          ? err.message
-          : "Query failed. Is the backend running?";
+      const msg = err instanceof Error ? err.message : "Query failed.";
       toast.error(msg);
-      // Replace the empty assistant bubble with the error
       updateMessage(localMsgId, { content: `⚠️ ${msg}` });
-    } finally {
       setThinking(false);
     }
   };

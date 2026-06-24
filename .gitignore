@@ -99,6 +99,8 @@ models/
 .env.local
 secrets.yaml
 api_keys.txt
+admin_credentials.txt
+
 
 # Data files (large)
 data/
@@ -134,10 +136,11 @@ uploaded_documents/
 papers/
 literature/
 sample_documents/
+app_data/
+scratch/
 
 # OS generated files
 Thumbs.db
-
 
 # Documentation
 docs/

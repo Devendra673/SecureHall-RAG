@@ -25,7 +25,7 @@ import { Settings } from "./Settings";
 import { UserProfile } from "./UserProfile";
 import { DocumentUpload } from "./DocumentUpload";
 import { motion, AnimatePresence } from "framer-motion";
-import { ApiService, HistoryEntryPayload, DocumentPayload } from "@/lib/api";
+import { ApiService, ChatSessionPayload, DocumentPayload } from "@/lib/api";
 import { toast } from "sonner";
 import { useAuthStore } from "@/store/authStore";
 import { useLogout } from "@/components/AuthProvider";
@@ -133,7 +133,7 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
 
   const [uploadOpen, setUploadOpen] = useState(false);
   const { isSettingsOpen, setSettingsOpen } = useSettingsStore();
-  const [history, setHistory] = useState<HistoryEntryPayload[]>([]);
+  const [history, setHistory] = useState<ChatSessionPayload[]>([]);
   const [search, setSearch] = useState("");
   const [activeTab, setActiveTab] = useState<"docs" | "history">("docs");
 
@@ -167,21 +167,33 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
 
   const loadHistory = useCallback(async () => {
     try {
-      const res = await ApiService.getHistory();
-      setHistory(res.entries);
+      const res = await ApiService.getSessions();
+      setHistory(res.sessions);
     } catch {
       // silently fail
     }
   }, []);
 
-  // Initial fetch
+  // Fetch data when component mounts or when user login state changes
   useEffect(() => {
     const init = async () => {
-      await loadDocuments();
-      await loadHistory();
+      if (user) {
+        await loadDocuments();
+        await loadHistory();
+      } else {
+        setDocuments([]);
+        setHistory([]);
+      }
     };
     void init();
-  }, [loadDocuments, loadHistory]);
+  }, [user, loadDocuments, loadHistory, setDocuments]);
+
+  // Reload history when switching to history tab
+  useEffect(() => {
+    if (user && activeTab === "history") {
+      void loadHistory();
+    }
+  }, [user, activeTab, loadHistory]);
 
   // Poll while any document is still processing
   useEffect(() => {
@@ -207,53 +219,26 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
 
   // ── handlers ─────────────────────────────────────────────
 
-  const handleLoadChat = async (entry: HistoryEntryPayload) => {
+  const handleLoadChat = async (entry: ChatSessionPayload) => {
     if (window.innerWidth < 768 && onClose) onClose();
     try {
-      const response = await ApiService.getAnswer(entry.answer_id);
+      const response = await ApiService.getSessionMessages(entry.session_id);
       clearMessages();
+      useChatStore.getState().setActiveSessionId(entry.session_id);
       
-      useChatStore.getState().addMessage({
-        id: `user-${Date.now()}`,
-        role: "user",
-        content: entry.query,
-        timestamp: new Date(entry.timestamp || Date.now()),
-      });
-      
-      // Need to populate the metadata map so feedback works on history
-      const localMsgId = `assistant-${Date.now()}`;
-      
-      useChatStore.getState().addMessage({
-        id: localMsgId,
-        role: "assistant",
-        content: response.answer,
-        citations: response.citations as any,
-        confidence: response.confidence,
-        timestamp: new Date(entry.timestamp || Date.now()),
-      });
-
-      // Dispatch an event to allow ChatInterface to set the answerId
-      window.dispatchEvent(new CustomEvent("rag:history-loaded", { 
-        detail: { localId: localMsgId, answerId: entry.answer_id } 
+      const mappedMessages = response.messages.map((m) => ({
+        id: m.id,
+        role: m.role,
+        content: m.content,
+        confidence: m.confidence !== null ? m.confidence : undefined,
+        citations: m.citations as any,
+        timestamp: new Date(m.created_at),
       }));
 
+      useChatStore.getState().loadSessionMessages(mappedMessages);
     } catch (err) {
       console.error(err);
-      // Fallback: just show what we have in the entry if fetch fails
-      clearMessages();
-      useChatStore.getState().addMessage({
-        id: `user-${Date.now()}`,
-        role: "user",
-        content: entry.query,
-        timestamp: new Date(entry.timestamp || Date.now()),
-      });
-      useChatStore.getState().addMessage({
-        id: `assistant-${Date.now()}`,
-        role: "assistant",
-        content: entry.answer_preview + "...",
-        confidence: entry.confidence,
-        timestamp: new Date(entry.timestamp || Date.now()),
-      });
+      toast.error("Failed to load session messages.");
     }
   };
 
@@ -279,11 +264,11 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
     }
   };
 
-  const handleDeleteHistory = async (answerId: string) => {
-    setMutatingHistId(answerId);
+  const handleDeleteHistory = async (sessionId: string) => {
+    setMutatingHistId(sessionId);
     try {
-      await ApiService.deleteHistoryEntry(answerId);
-      setHistory((prev) => prev.filter((e) => e.answer_id !== answerId));
+      await ApiService.deleteSession(sessionId);
+      setHistory((prev) => prev.filter((e) => e.session_id !== sessionId));
       toast.success("Chat removed.");
     } catch {
       toast.error("Failed to remove chat.");
@@ -292,42 +277,25 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
     }
   };
 
-  const handleTogglePin = async (answerId: string, currentPin: boolean) => {
-    setMutatingHistId(answerId);
-    try {
-      const updated = await ApiService.updateHistoryEntry(answerId, {
-        is_pinned: !currentPin,
-      });
-      setHistory((prev) =>
-        prev.map((e) =>
-          e.answer_id === answerId ? { ...e, is_pinned: updated.is_pinned } : e
-        )
-      );
-      toast.success(updated.is_pinned ? "Pinned." : "Unpinned.");
-    } catch {
-      toast.error("Failed to update pin.");
-    } finally {
-      setMutatingHistId(null);
-    }
+  // Pinning removed for sessions
+
+  const startRename = (entry: ChatSessionPayload) => {
+    setRenamingId(entry.session_id);
+    setRenameValue(entry.title ?? "New Chat");
   };
 
-  const startRename = (entry: HistoryEntryPayload) => {
-    setRenamingId(entry.answer_id);
-    setRenameValue(entry.title ?? entry.query);
-  };
-
-  const commitRename = async (answerId: string) => {
+  const commitRename = async (sessionId: string) => {
     const trimmed = renameValue.trim();
     setRenamingId(null);
     if (!trimmed) return;
-    setMutatingHistId(answerId);
+    setMutatingHistId(sessionId);
     try {
-      const updated = await ApiService.updateHistoryEntry(answerId, {
+      const updated = await ApiService.updateSession(sessionId, {
         title: trimmed,
       });
       setHistory((prev) =>
         prev.map((e) =>
-          e.answer_id === answerId ? { ...e, title: updated.title } : e
+          e.session_id === sessionId ? { ...e, title: updated.title } : e
         )
       );
     } catch {
@@ -347,15 +315,10 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
 
   const filteredHistory = history
     .filter((h) =>
-      (h.title ?? h.query).toLowerCase().includes(q) ||
-      h.answer_preview?.toLowerCase().includes(q)
+      (h.title ?? "").toLowerCase().includes(q)
     )
     .sort((a, b) => {
-      // Pinned entries always first
-      if (a.is_pinned && !b.is_pinned) return -1;
-      if (!a.is_pinned && b.is_pinned) return 1;
-      // Then by timestamp descending
-      return new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime();
+      return new Date(b.last_message_at || b.created_at).getTime() - new Date(a.last_message_at || a.created_at).getTime();
     });
 
   // ── render ───────────────────────────────────────────────
@@ -589,9 +552,6 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
                       <BarChart2 className="h-3 w-3" />
                       {history.length} conversation{history.length !== 1 ? "s" : ""}
                     </span>
-                    <span>
-                      {history.filter((h) => h.is_pinned).length} pinned
-                    </span>
                   </div>
                 )}
 
@@ -607,35 +567,27 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
                   ) : (
                     filteredHistory.map((entry) => (
                       <div
-                        key={entry.answer_id}
+                        key={entry.session_id}
                         onClick={() => handleLoadChat(entry)}
-                        className={`group rounded-md px-2 py-2 transition-colors hover:bg-muted/50 cursor-pointer ${
-                          entry.is_pinned
-                            ? "bg-primary/5 border border-primary/15"
-                            : ""
-                        }`}
+                        className="group rounded-md px-2 py-2 transition-colors hover:bg-muted/50 cursor-pointer"
                       >
                         <div className="flex items-start gap-2">
                           {/* Icon */}
                           <div className="mt-0.5 shrink-0">
-                            {entry.is_pinned ? (
-                              <Pin className="h-3.5 w-3.5 text-primary" />
-                            ) : (
-                              <MessageSquare className="h-3.5 w-3.5 text-muted-foreground" />
-                            )}
+                            <MessageSquare className="h-3.5 w-3.5 text-muted-foreground" />
                           </div>
 
                           {/* Title / rename input */}
                           <div className="flex-1 min-w-0">
-                            {renamingId === entry.answer_id ? (
+                            {renamingId === entry.session_id ? (
                               <Input
                                 ref={renameInputRef}
                                 value={renameValue}
                                 onChange={(e) => setRenameValue(e.target.value)}
-                                onBlur={() => commitRename(entry.answer_id)}
+                                onBlur={() => commitRename(entry.session_id)}
                                 onKeyDown={(e) => {
                                   if (e.key === "Enter")
-                                    commitRename(entry.answer_id);
+                                    commitRename(entry.session_id);
                                   if (e.key === "Escape")
                                     setRenamingId(null);
                                 }}
@@ -644,37 +596,22 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
                             ) : (
                               <p
                                 className="truncate text-xs font-medium text-muted-foreground group-hover:text-foreground"
-                                title={entry.query}
+                                title={entry.title || "New Chat"}
                               >
-                                {entry.title ?? entry.query}
+                                {entry.title || "New Chat"}
                               </p>
                             )}
                             <p className="text-[10px] text-muted-foreground/60 mt-0.5">
-                              {fmtDate(entry.timestamp)}
-                              {entry.citation_count > 0 &&
-                                ` · ${entry.citation_count} cite${
-                                  entry.citation_count !== 1 ? "s" : ""
+                              {fmtDate(entry.last_message_at || entry.created_at)}
+                              {entry.message_count > 0 &&
+                                ` · ${entry.message_count} msg${
+                                  entry.message_count !== 1 ? "s" : ""
                                 }`}
-                              {entry.confidence > 0 &&
-                                ` · ${Math.round(entry.confidence * 100)}% conf.`}
                             </p>
                           </div>
 
                           {/* Context actions — visible on hover */}
                           <div className="flex items-center gap-0 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-5 w-5 hover:text-primary"
-                              title={entry.is_pinned ? "Unpin" : "Pin"}
-                              disabled={mutatingHistId === entry.answer_id}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                handleTogglePin(entry.answer_id, entry.is_pinned);
-                              }}
-                            >
-                              <Pin className="h-3 w-3" />
-                            </Button>
                             <Button
                               variant="ghost"
                               size="icon"
@@ -692,10 +629,10 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
                               size="icon"
                               className="h-5 w-5 text-destructive/70 hover:text-destructive hover:bg-destructive/10"
                               title="Delete"
-                              disabled={mutatingHistId === entry.answer_id}
+                              disabled={mutatingHistId === entry.session_id}
                               onClick={(e) => {
                                 e.stopPropagation();
-                                handleDeleteHistory(entry.answer_id);
+                                handleDeleteHistory(entry.session_id);
                               }}
                             >
                               <Trash2 className="h-3 w-3" />
