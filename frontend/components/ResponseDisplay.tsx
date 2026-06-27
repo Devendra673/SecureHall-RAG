@@ -20,8 +20,10 @@ import { toast } from "sonner";
 // ─────────────────────────────────────────────────────────
 // Confidence badge
 // ─────────────────────────────────────────────────────────
-function ConfidenceBadge({ score }: { score: number }) {
-  if (score >= 0.75) {
+function ConfidenceBadge({ score, tier }: { score: number; tier?: string }) {
+  const displayTier = tier || (score >= 0.75 ? "HIGH" : score >= 0.5 ? "MODERATE" : "LOW");
+  
+  if (displayTier === "HIGH") {
     return (
       <span className="inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-emerald-700 dark:text-emerald-400 bg-emerald-100/60 dark:bg-emerald-900/30 border border-emerald-300/50 dark:border-emerald-700/50 rounded-full px-3 py-1">
         <ShieldCheck className="h-3.5 w-3.5" />
@@ -29,18 +31,26 @@ function ConfidenceBadge({ score }: { score: number }) {
       </span>
     );
   }
-  if (score >= 0.5) {
+  if (displayTier === "MODERATE") {
     return (
       <span className="inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-amber-700 dark:text-amber-400 bg-amber-100/60 dark:bg-amber-900/30 border border-amber-300/50 dark:border-amber-700/50 rounded-full px-3 py-1">
         <AlertTriangle className="h-3.5 w-3.5" />
-        Medium Confidence · {Math.round(score * 100)}%
+        Moderate Confidence · {Math.round(score * 100)}%
+      </span>
+    );
+  }
+  if (displayTier === "LOW") {
+    return (
+      <span className="inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-orange-700 dark:text-orange-400 bg-orange-100/60 dark:bg-orange-900/30 border border-orange-300/50 dark:border-orange-700/50 rounded-full px-3 py-1">
+        <AlertTriangle className="h-3.5 w-3.5" />
+        Low Confidence · {Math.round(score * 100)}%
       </span>
     );
   }
   return (
     <span className="inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-red-700 dark:text-red-400 bg-red-100/60 dark:bg-red-900/30 border border-red-300/50 dark:border-red-700/50 rounded-full px-3 py-1">
       <ShieldAlert className="h-3.5 w-3.5" />
-      Low Confidence · {Math.round(score * 100)}%
+      Abstained · {Math.round(score * 100)}%
     </span>
   );
 }
@@ -55,6 +65,7 @@ interface ResponseDisplayProps {
   answerId: string;
   /** Overall response confidence score (0–1) */
   confidence?: number;
+  uncertaintyTier?: string;
   onShowCitations?: () => void;
 }
 
@@ -66,6 +77,7 @@ export function ResponseDisplay({
   citations,
   answerId,
   confidence,
+  uncertaintyTier,
   onShowCitations,
 }: ResponseDisplayProps) {
   const [copied, setCopied] = React.useState(false);
@@ -104,13 +116,40 @@ export function ResponseDisplay({
       {/* Confidence badge */}
       {showBadge && (
         <div>
-          <ConfidenceBadge score={confidence!} />
+          <ConfidenceBadge score={confidence!} tier={uncertaintyTier} />
         </div>
       )}
 
       {/* Markdown content */}
       <div className="prose prose-base dark:prose-invert max-w-none prose-p:leading-relaxed prose-pre:bg-muted/50 prose-pre:border">
-        <ReactMarkdown>{content.replace(/▌$/, "")}</ReactMarkdown>
+        <ReactMarkdown
+          components={{
+            a: ({ href, children, ...props }) => {
+              if (href?.startsWith("#citation-")) {
+                const citNum = href.replace("#citation-", "");
+                return (
+                  <span
+                    onClick={(e) => {
+                      e.preventDefault();
+                      if (onShowCitations) onShowCitations();
+                    }}
+                    className="inline-flex items-center justify-center bg-primary/15 hover:bg-primary/30 text-primary font-bold text-[9px] w-4 h-4 rounded-full mx-0.5 cursor-pointer select-none align-super transition-colors border border-primary/30 shadow-sm"
+                    title={`View Source ${citNum}`}
+                  >
+                    {citNum}
+                  </span>
+                );
+              }
+              return (
+                <a href={href} {...props} target="_blank" rel="noopener noreferrer">
+                  {children}
+                </a>
+              );
+            },
+          }}
+        >
+          {content.replace(/▌$/, "").replace(/\[([0-9]+)\]/g, "[$1](#citation-$1)")}
+        </ReactMarkdown>
       </div>
 
       {/* Action bar — only shown when streaming is done */}

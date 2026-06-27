@@ -99,6 +99,7 @@ def _row_to_message_schema(row: ChatMessage) -> ChatMessageSchema:
         citations=citations,
         sources=sources,
         hallucination_risk=row.hallucination_risk,
+        uncertainty_tier=getattr(row, "uncertainty_tier", None),
         latency_ms=float(row.latency_ms or 0),
         created_at=row.created_at,
     )
@@ -128,6 +129,7 @@ def _row_to_response(row: QueryHistory) -> QueryResponse:
         citations=citations,
         confidence=row.confidence / 100.0,
         hallucination_risk=row.hallucination_risk or "unknown",
+        uncertainty_tier=getattr(row, "uncertainty_tier", None),
         latency_ms=float(row.latency_ms or 0),
         sources=sources,
     )
@@ -300,6 +302,7 @@ async def submit_query(
         hallucination_risk="low" if result.get("confidence", 0) > 0.7 else "medium",
         latency_ms=float(result.get("latency_ms", 0.0)),
         sources=result.get("sources", []),
+        uncertainty_tier=result.get("uncertainty_tier"),
     )
 
     # ── Persist to ChatSession + ChatMessage ──────────────────────────────────
@@ -324,6 +327,7 @@ async def submit_query(
             citations_json=json.dumps([c.model_dump() for c in api_citations], default=str),
             sources_json=json.dumps(response.sources, default=str),
             hallucination_risk=response.hallucination_risk,
+            uncertainty_tier=response.uncertainty_tier,
             latency_ms=int(response.latency_ms),
         )
         db.add(assistant_msg)
@@ -351,6 +355,7 @@ async def submit_query(
             sources_json=json.dumps(response.sources, default=str),
             confidence=int(response.confidence * 100),
             hallucination_risk=response.hallucination_risk,
+            uncertainty_tier=response.uncertainty_tier,
             latency_ms=int(response.latency_ms),
         )
         db.add(history_row)

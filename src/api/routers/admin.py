@@ -269,3 +269,81 @@ async def list_feedback(
         }
         for f in items
     ]
+
+
+from fastapi import BackgroundTasks
+from ..services.rag_engine import get_pipeline
+
+class FineTuneEntry(BaseModel):
+    question: str
+    positive: str
+
+class FineTuneRequest(BaseModel):
+    qa_pairs: List[FineTuneEntry]
+    epochs: Optional[int] = 3
+    batch_size: Optional[int] = 16
+
+def run_background_finetune(qa_pairs_data: list[dict], epochs: int, batch_size: int):
+    try:
+        from src.training.finetune_embeddings import EmbeddingFineTuner
+        tuner = EmbeddingFineTuner()
+        examples = tuner.prepare_training_data(qa_pairs_data)
+        model_path = tuner.train(examples, epochs=epochs, batch_size=batch_size)
+        
+        # Swap model in active pipeline
+        pipeline = get_pipeline()
+        if pipeline:
+            pipeline.use_finetuned_embeddings(model_path)
+            logger.info("Successfully loaded fine-tuned embeddings into RAG pipeline.")
+    except Exception as e:
+        logger.error(f"Background fine-tuning failed: {e}")
+
+@router.get("/cache/stats", dependencies=[Depends(require_admin)])
+async def get_cache_stats():
+    """Get semantic cache metrics and statistics."""
+    pipeline = get_pipeline()
+    if hasattr(pipeline, "cache") and pipeline.cache is not None:
+        return pipeline.cache.stats()
+    return {"enabled": False, "message": "Semantic cache is not initialized."}
+
+@router.post("/embeddings/finetune", dependencies=[Depends(require_admin)])
+async def trigger_embeddings_finetune(
+    body: FineTuneRequest,
+    background_tasks: BackgroundTasks
+):
+    """Trigger contrastive fine-tuning of the embedding model as a background task."""
+    try:
+        from src.training.finetune_embeddings import _TRAINING_AVAILABLE
+    except ImportError:
+        _TRAINING_AVAILABLE = False
+
+    if not _TRAINING_AVAILABLE:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Embedding fine-tuning dependencies are not available in current virtual environment."
+        )
+
+    if not body.qa_pairs:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="qa_pairs list cannot be empty."
+        )
+
+    qa_pairs_data = [{"question": p.question, "positive": p.positive} for p in body.qa_pairs]
+
+    # Enqueue background task
+    background_tasks.add_task(
+        run_background_finetune,
+        qa_pairs_data,
+        body.epochs,
+        body.batch_size
+    )
+
+    return {
+        "status": "started",
+        "message": "Fine-tuning embedding model in background. The model will be swapped automatically once complete.",
+        "output_dir": "models/finetuned-embeddings",
+        "epochs": body.epochs,
+        "batch_size": body.batch_size,
+        "training_examples_count": len(body.qa_pairs)
+    }

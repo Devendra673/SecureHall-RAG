@@ -50,6 +50,7 @@ export interface ChatMessage {
   content: string;
   citations?: Citation[];
   confidence?: number;
+  uncertainty_tier?: string;
   timestamp: Date;
 }
 

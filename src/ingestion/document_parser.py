@@ -18,6 +18,13 @@ try:
 except ImportError:
     from PyPDF2 import PdfReader  # fallback for older installs
 
+try:
+    import pdfplumber
+    _PDFPLUMBER_AVAILABLE = True
+except ImportError:
+    _PDFPLUMBER_AVAILABLE = False
+
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -123,6 +130,61 @@ class DocumentParser:
             logger.error(f"Error parsing DOCX {file_path}: {e}")
             raise
 
+    def _extract_tables_as_markdown(self, file_path: str) -> Dict[int, List[str]]:
+        """
+        Extract all tables from a PDF page by page, formatting them as Markdown.
+        """
+        tables_by_page = {}
+        if not _PDFPLUMBER_AVAILABLE:
+            return tables_by_page
+
+        try:
+            with pdfplumber.open(file_path) as pdf:
+                logger.info(f"pdfplumber extracting tables from {Path(file_path).name}...")
+                for page_idx, page in enumerate(pdf.pages):
+                    page_number = page_idx + 1
+                    tables = page.extract_tables()
+                    if not tables:
+                        continue
+
+                    md_tables = []
+                    for table in tables:
+                        if not table or not any(table):
+                            continue
+                        
+                        cleaned_table = []
+                        for row in table:
+                            cleaned_row = [str(cell).strip().replace("\n", " ") if cell is not None else "" for cell in row]
+                            if any(cleaned_row):
+                                cleaned_table.append(cleaned_row)
+                                
+                        if not cleaned_table:
+                            continue
+
+                        headers = cleaned_table[0]
+                        header_line = "| " + " | ".join(headers) + " |"
+                        separator_line = "| " + " | ".join(["---"] * len(headers)) + " |"
+                        
+                        rows_lines = []
+                        for row in cleaned_table[1:]:
+                            if len(row) < len(headers):
+                                row.extend([""] * (len(headers) - len(row)))
+                            elif len(row) > len(headers):
+                                row = row[:len(headers)]
+                            rows_lines.append("| " + " | ".join(row) + " |")
+
+                        markdown_table = header_line + "\n" + separator_line + "\n" + "\n".join(rows_lines)
+                        md_tables.append(markdown_table)
+
+                    if md_tables:
+                        tables_by_page[page_number] = md_tables
+                        
+            logger.info(f"Extracted tables from {len(tables_by_page)} pages")
+        except Exception as e:
+            logger.error(f"Failed to extract tables via pdfplumber from {file_path}: {e}")
+
+        return tables_by_page
+
     def parse_pdf(self, file_path: str) -> List[Tuple[str, DocumentMetadata]]:
         """
         Parse PDF file with page tracking.
@@ -132,17 +194,15 @@ class DocumentParser:
 
         Returns:
             List of (page_text, metadata) tuples with page numbers
-
-        Implementation:
-        - Uses PyPDF2 for text extraction
-        - Tracks page numbers
-        - Maintains text order and structure
         """
         results = []
         file_name = Path(file_path).name
         char_offset = 0
 
         try:
+            # Extract tables page by page
+            tables_by_page = self._extract_tables_as_markdown(file_path)
+
             with open(file_path, "rb") as pdf_file:
                 reader = PdfReader(pdf_file)
                 num_pages = len(reader.pages)
@@ -150,19 +210,23 @@ class DocumentParser:
 
                 for page_num in range(num_pages):
                     page = reader.pages[page_num]
-                    # extract_text() may return None on encrypted/image-only pages
                     raw_text = page.extract_text()
                     text = (raw_text or "").strip()
 
+                    page_1based = page_num + 1
+                    if page_1based in tables_by_page:
+                        for table_md in tables_by_page[page_1based]:
+                            text += f"\n\n[Table extracted from page {page_1based}]:\n{table_md}\n"
+
                     # Skip empty pages
-                    if not text:
+                    if not text.strip():
                         continue
 
                     # Create metadata with page tracking and char positions
                     metadata = DocumentMetadata(
                         source_file=file_name,
-                        page_number=page_num + 1,  # 1-indexed pages
-                        section_name=f"Page {page_num + 1}",
+                        page_number=page_1based,
+                        section_name=f"Page {page_1based}",
                         char_start=char_offset,
                         char_end=char_offset + len(text),
                     )

@@ -43,7 +43,7 @@ try:
     )
     from .verification.answer_assembler import AnswerAssembler
     from .verification.evidence_retriever import EvidenceRetriever
-    from .verification.data_structures import Claim, EvidenceSet, Chunk as VerifChunk
+    from .verification.data_structures import Claim, EvidenceSet, Chunk as VerifChunk, SupportLevel, VerificationDecision
 
     _VERIFICATION_AVAILABLE = True
 except ImportError as _ve:
@@ -88,6 +88,8 @@ class RAGPipeline:
         temperature: float = 0.3,
         reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
         enable_reranking: bool = True,
+        enable_hyde: bool = True,
+        enable_cache: bool = True,
         data_dir: Optional[str] = None,
     ):
         """
@@ -114,6 +116,17 @@ class RAGPipeline:
 
         self.llm = LLMInference(model_name=llm_model, temperature=temperature)
         self.retrieval_top_k = retrieval_top_k
+        self.enable_hyde = enable_hyde
+        self.enable_cache = enable_cache
+        self.enable_raptor = True
+
+        self.cache = None
+        if self.enable_cache:
+            try:
+                from .retrieval.semantic_cache import SemanticCache
+                self.cache = SemanticCache(embedding_model=dense_model)
+            except Exception as cache_err:
+                logger.warning(f"Failed to load semantic cache: {cache_err}")
 
         self.index_built = False
         self.total_chunks = 0
@@ -230,8 +243,8 @@ class RAGPipeline:
                 # per-paragraph metadata for richer chunk metadata downstream.
                 full_text = "\n\n".join(text for text, _ in parsed_tuples)
 
-                # Chunk the combined text
-                chunks = self.chunker.chunk(
+                # Chunk the combined text with parent-child chunking
+                chunks, child_to_parent = self.chunker.chunk_with_parents(
                     full_text,
                     source_file=file_path.name,
                     chunk_id_prefix=file_path.stem,
@@ -239,8 +252,8 @@ class RAGPipeline:
                 logger.info(f"Created {len(chunks)} chunks from {file_path.name}")
 
                 # Store chunks and metadata
-                for chunk_idx, chunk in enumerate(chunks):
-                    chunk_id = f"{file_path.stem}_{chunk_idx:04d}"
+                for chunk in chunks:
+                    chunk_id = chunk.chunk_id
 
                     # Store text for citations
                     self.chunk_id_to_text[chunk_id] = chunk.text
@@ -254,12 +267,17 @@ class RAGPipeline:
                         chunk_id=chunk_id,
                         source_doc=str(file_path),
                         section=getattr(chunk, "section", "Default"),
-                        page_num=getattr(chunk, "page", 1),
+                        page_num=getattr(chunk, "page_number", 1),
                         start_char=getattr(chunk, "start_pos", 0),
                         end_char=getattr(chunk, "end_pos", 0),
                         chunk_text_length=len(chunk.text),
+                        parent_chunk_id=chunk.parent_chunk_id,
                     )
                     self.metadata_store.add_chunk(chunk_metadata)
+                    
+                    if chunk.parent_chunk_id and chunk.parent_text:
+                        self.metadata_store.store_parent_text(chunk.parent_chunk_id, chunk.parent_text)
+
                     chunk_count += 1
 
                 # Register document in metadata store
@@ -274,6 +292,36 @@ class RAGPipeline:
 
             if chunk_count == 0:
                 raise RuntimeError("No valid chunks created from documents")
+
+            # Build RAPTOR Hierarchical Summary Tree
+            if getattr(self, "enable_raptor", True) and self.llm.is_loaded:
+                try:
+                    from .ingestion.raptor_tree import RaptorTreeBuilder
+                    raptor_builder = RaptorTreeBuilder(self.llm, self.retriever.dense_retriever)
+                    summary_texts, summary_ids, summary_metadata = raptor_builder.build_summaries(new_texts, new_chunk_ids)
+                    
+                    if summary_texts:
+                        logger.info(f"RAPTOR: Adding {len(summary_texts)} summary chunks to corpus...")
+                        for s_text, s_id, s_meta in zip(summary_texts, summary_ids, summary_metadata):
+                            # Add to core mappings
+                            self.chunk_id_to_text[s_id] = s_text
+                            new_texts.append(s_text)
+                            new_chunk_ids.append(s_id)
+                            
+                            # Add to metadata store so that parent/source tracing doesn't crash
+                            chunk_metadata = ChunkMetadata(
+                                chunk_id=s_id,
+                                source_doc="Hierarchical Summary",
+                                section="RAPTOR Summary Node",
+                                page_num=1,
+                                start_char=0,
+                                end_char=len(s_text),
+                                chunk_text_length=len(s_text),
+                                parent_chunk_id=None,
+                            )
+                            self.metadata_store.add_chunk(chunk_metadata)
+                except Exception as raptor_err:
+                    logger.warning(f"Failed to build RAPTOR summary: {raptor_err}")
 
             # Merge new chunks into the persistent corpus
             self._corpus_texts.extend(new_texts)
@@ -324,6 +372,14 @@ class RAGPipeline:
         }
         if q in greetings:
             return True
+
+        # Check for time/date queries (e.g. "what is the time", "current date", "what date is today")
+        time_keywords = {"time", "date", "today", "now", "clock"}
+        if any(tk in q for tk in time_keywords) and len(q.split()) <= 6:
+            rag_keywords = {"policy", "document", "file", "leave", "pdf", "docx", "upload", "admission", "requirements"}
+            if not any(rk in q for rk in rag_keywords): # avoid matches
+                return True
+
         # If it's very short and matches greeting words without RAG keywords
         words = q.split()
         if len(words) <= 3 and any(w in greetings for w in words):
@@ -331,6 +387,133 @@ class RAGPipeline:
             if not any(w in rag_keywords for w in words):
                 return True
         return False
+
+    def use_finetuned_embeddings(self, model_path: str) -> bool:
+        """
+        Load fine-tuned embeddings model and re-index corpus (Domain Adaptation).
+        """
+        try:
+            from sentence_transformers import SentenceTransformer
+            logger.info(f"Loading fine-tuned embeddings from: {model_path}")
+            
+            # Load new model to dense retriever
+            self.retriever.dense_retriever.model = SentenceTransformer(model_path)
+            
+            # If we have corpus texts, rebuild index with the new model
+            if self._corpus_texts:
+                logger.info(f"Re-indexing {len(self._corpus_texts)} chunks using fine-tuned model...")
+                self.retriever.build_index(self._corpus_texts, self._corpus_chunk_ids)
+                
+            logger.info("Successfully switched to fine-tuned embedding model!")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to load fine-tuned embedding model: {e}")
+            return False
+
+    def _attempt_self_correction(
+        self,
+        original_answer: str,
+        context: str,
+        question: str,
+        verification_report: List[dict],
+        verif_chunks: list,
+        is_web_search: bool,
+        max_retries: int = 1,
+    ) -> Tuple[str, float, bool]:
+        """
+        Attempt to rewrite answer using LLM based on critique of unsupported claims.
+        """
+        if not verification_report:
+            return original_answer, 1.0, True
+
+        unsupported_list = "\n".join(
+            f"{idx + 1}. Claim: \"{item['claim']}\" (Level: {item['support_level']}) - Reason: {item['reason']}"
+            for idx, item in enumerate(verification_report)
+        )
+
+        critique_prompt = f"""Your previous answer draft:
+---
+{original_answer}
+---
+
+The following claims in your answer were found to be UNSUPPORTED by the source documents:
+{unsupported_list}
+
+Using ONLY the following verified context, rewrite your answer to remove or correct the unsupported claims.
+If you cannot write a factually supported answer, respond with: "I apologize, but I cannot find sufficient verified evidence to answer this question."
+
+Context:
+{context}
+
+Question: {question}"""
+
+        logger.info(f"Self-correction prompt generated with {len(verification_report)} unsupported claims. Attempting generate...")
+
+        try:
+            corrected_answer = self.llm.generate(prompt=critique_prompt, max_tokens=1024)
+            if not corrected_answer or not corrected_answer.strip():
+                return original_answer, 0.0, False
+
+            if "apologize" in corrected_answer.lower() or "cannot find sufficient" in corrected_answer.lower():
+                return corrected_answer, 0.0, False
+
+            # Verify corrected answer
+            splitter = LLMClaimSplitter(llm=self.llm)
+            claims = splitter.split_into_claims(corrected_answer)
+            if not claims:
+                return corrected_answer, 1.0, True
+
+            evidence_sets = {
+                claim.claim_id: EvidenceSet(
+                    claim_id=claim.claim_id,
+                    evidence_chunks=verif_chunks,
+                    retrieval_scores=[ch.relevance_score for ch in verif_chunks],
+                    retrieval_method="web_search" if is_web_search else "hybrid",
+                    num_retrieved=len(verif_chunks),
+                )
+                for claim in claims
+            }
+
+            scorer = SupportScorer(use_nli=False, llm=self.llm)
+            scores = scorer.score_support_batch(claims, list(evidence_sets.values()))
+
+            threshold_engine = RefusalThresholdEngine(ThresholdConfigurations.BALANCED)
+            decisions = threshold_engine.make_decisions_batch(scores)
+
+            assembler = AnswerAssembler()
+            verified = assembler.assemble_answer(
+                corrected_answer, claims, scores, decisions, evidence_sets
+            )
+
+            new_confidence = verified.total_support_score
+
+            if new_confidence >= 0.80:
+                return verified.verified_answer, new_confidence, True
+            elif max_retries > 0:
+                # Recurse
+                new_verification_report = []
+                for c in verified.claims_breakdown:
+                    if c.support_level in [SupportLevel.UNSUPPORTED, SupportLevel.CONFLICTING] or c.decision == VerificationDecision.REFUSE:
+                        new_verification_report.append({
+                            "claim": c.claim_text,
+                            "support_level": c.support_level.value,
+                            "reason": c.reasoning or "No clear evidence found in sources."
+                        })
+                return self._attempt_self_correction(
+                    original_answer=corrected_answer,
+                    context=context,
+                    question=question,
+                    verification_report=new_verification_report,
+                    verif_chunks=verif_chunks,
+                    is_web_search=is_web_search,
+                    max_retries=max_retries - 1,
+                )
+            else:
+                return verified.verified_answer, new_confidence, False
+
+        except Exception as e:
+            logger.error(f"Error during self-correction attempt: {e}")
+            return original_answer, 0.0, False
 
     def query(
         self,
@@ -377,30 +560,117 @@ class RAGPipeline:
 
         is_conversational = self._is_conversational_query(question)
 
+        # Semantic Caching check
+        if self.enable_cache and self.cache and not is_conversational:
+            cached = self.cache.get(question)
+            if cached:
+                logger.info("SemanticCache: returning cached result")
+                # update latency
+                cached["latency_ms"] = (time.time() - start_time) * 1000
+                cached["cache_hit"] = True
+                return cached
+
+        # Lazy LLM init for query rewriting if needed
+        if history and not is_conversational and not self.llm.is_loaded:
+            try:
+                self.llm.load_model()
+            except Exception as e:
+                logger.warning(f"LLM lazy init during query rewriting failed ({e})")
+
+        search_query = question
+        if history and self.llm.is_loaded and not is_conversational:
+            try:
+                search_query = self.llm.rewrite_query(question, history)
+            except Exception as e:
+                logger.error(f"Error during query rewriting: {e}")
+                search_query = question
+
+        # HyDE Query Expansion
+        if self.enable_hyde and self.llm.is_loaded and not is_conversational:
+            try:
+                hyde_doc = self.llm.generate_hypothetical_document(search_query)
+                if hyde_doc and hyde_doc != search_query:
+                    search_query = hyde_doc
+                    logger.info("HyDE: using hypothetical document for retrieval")
+            except Exception as e:
+                logger.warning(f"HyDE generation failed: {e}")
+
         try:
             # Retrieve relevant chunks (get 3x more if re-ranking is enabled)
             retrieval_start = time.time()
+            
+            # Detect multi-hop query
+            is_multihop = False
+            sub_questions = [search_query]
+            multihop_keywords = {"compare", "difference", "both", "and also", "as well as", "relation", "compare and contrast"}
+            has_keywords = any(k in search_query.lower() for k in multihop_keywords) or (" and " in search_query.lower() and len(search_query.split()) > 6)
+            
+            if self.llm.is_loaded and not is_conversational and has_keywords:
+                try:
+                    decomposed = self.llm.decompose_query(search_query)
+                    if len(decomposed) > 1:
+                        is_multihop = True
+                        sub_questions = decomposed
+                        logger.info(f"Multi-hop routing activated. Sub-questions: {sub_questions}")
+                except Exception as e:
+                    logger.warning(f"Decomposition failed: {e}")
+
             if self.index_built and not is_conversational:
-                fetch_k = (
-                    self.retrieval_top_k * 3
-                    if self.enable_reranking and self.reranker and self.reranker.is_loaded
-                    else self.retrieval_top_k
-                )
-                search_results = self.retriever.search(
-                    question, top_k=fetch_k, allowed_doc_ids=allowed_doc_ids
-                )
+                if is_multihop:
+                    combined_results = []
+                    seen_chunk_ids = set()
+                    fetch_k = (
+                        self.retrieval_top_k * 3
+                        if self.enable_reranking and self.reranker and self.reranker.is_loaded
+                        else self.retrieval_top_k
+                    )
+                    for sub_q in sub_questions:
+                        sub_results = self.retriever.search(
+                            sub_q, top_k=fetch_k, allowed_doc_ids=allowed_doc_ids
+                        )
+                        # Re-rank sub-results
+                        if (
+                            self.enable_reranking
+                            and self.reranker
+                            and self.reranker.is_loaded
+                            and sub_results
+                        ):
+                            sub_results = self.reranker.rerank(
+                                query=sub_q,
+                                results=sub_results,
+                                chunk_texts=self.chunk_id_to_text,
+                                top_k=self.retrieval_top_k,
+                            )
+                        for res in sub_results:
+                            if res.chunk_id not in seen_chunk_ids:
+                                seen_chunk_ids.add(res.chunk_id)
+                                combined_results.append(res)
+                    
+                    # Sort combined results by score descending
+                    combined_results.sort(key=lambda r: getattr(r, "hybrid_score", 0.0) or getattr(r, "raw_dense_score", 0.0), reverse=True)
+                    search_results = combined_results[:self.retrieval_top_k]
+                else:
+                    fetch_k = (
+                        self.retrieval_top_k * 3
+                        if self.enable_reranking and self.reranker and self.reranker.is_loaded
+                        else self.retrieval_top_k
+                    )
+                    search_results = self.retriever.search(
+                        search_query, top_k=fetch_k, allowed_doc_ids=allowed_doc_ids
+                    )
             else:
                 search_results = []
 
-            # Re-rank results
+            # Re-rank results (for non-multihop)
             if (
-                self.enable_reranking
+                not is_multihop
+                and self.enable_reranking
                 and self.reranker
                 and self.reranker.is_loaded
                 and search_results
             ):
                 search_results = self.reranker.rerank(
-                    query=question,
+                    query=search_query,
                     results=search_results,
                     chunk_texts=self.chunk_id_to_text,
                     top_k=self.retrieval_top_k,
@@ -436,7 +706,7 @@ class RAGPipeline:
 
             if not is_conversational and (not search_results or calibrated < 0.35):
                 logger.info(f"Low confidence ({calibrated:.2f}) or empty results. Triggering web search fallback...")
-                web_results = self.web_search_service.search(question, num_results=3)
+                web_results = self.web_search_service.search(search_query, num_results=3)
                 if web_results:
                     is_web_search = True
                     calibrated = 0.5 # Web search default confidence
@@ -452,6 +722,8 @@ class RAGPipeline:
 
             # If not web search and we have local search results, populate citations from local
             if not is_web_search and search_results:
+                seen_parents = set()
+                parent_context_chunks = []
                 for result in search_results:
                     chunk_id = result.chunk_id
                     chunk_text = self.chunk_id_to_text.get(chunk_id, "")
@@ -459,8 +731,11 @@ class RAGPipeline:
                     # Get metadata
                     chunk_metadata = self.metadata_store.get_chunk(chunk_id)
                     source_file = "Unknown"
-                    if chunk_metadata and chunk_metadata.source_doc:
-                        source_file = chunk_metadata.source_doc
+                    parent_id = ""
+                    if chunk_metadata:
+                        if chunk_metadata.source_doc:
+                            source_file = chunk_metadata.source_doc
+                        parent_id = getattr(chunk_metadata, "parent_chunk_id", "")
                     else:
                         parts = chunk_id.rsplit("_", 1)
                         if parts:
@@ -473,8 +748,19 @@ class RAGPipeline:
                                         break
 
                     citations.append((chunk_id, source_file, chunk_text))
-                    context_chunks.append((chunk_text, result.hybrid_score, source_file))
                     sources_set.add(Path(source_file).name)
+
+                    if parent_id:
+                        if parent_id not in seen_parents:
+                            seen_parents.add(parent_id)
+                            parent_text = self.metadata_store.get_parent_text(parent_id)
+                            if parent_text:
+                                parent_context_chunks.append((parent_text, result.hybrid_score, source_file))
+                            else:
+                                parent_context_chunks.append((chunk_text, result.hybrid_score, source_file))
+                    else:
+                        parent_context_chunks.append((chunk_text, result.hybrid_score, source_file))
+                context_chunks = parent_context_chunks
 
             # Format context
             context = self.format_context(context_chunks)
@@ -512,7 +798,7 @@ class RAGPipeline:
 Instructions:
 - Synthesize information from ALL relevant search results.
 - Give a comprehensive, detailed answer.
-- Cite the source URL when referencing specific facts (e.g. "According to [URL]...").
+- Cite the corresponding web search result using bracket numbers like [1] or [2] at the end of the sentence or clause containing the fact. The bracket number must correspond to the section index (e.g. use [1] for the first section, [2] for the second).
 - If the user is simply greeting you (e.g. "hi", "hello") or making general conversation, respond CONCISELY and politely without referencing search results. Keep greetings to 1-2 sentences max.
 - Otherwise, if the answer to the user's specific question is not in the context, say: "The information is not available in the search results."
 
@@ -530,7 +816,7 @@ Instructions:
 - Synthesize information from ALL relevant sections of the context below.
 - Give a comprehensive, detailed answer covering all relevant points found.
 - If information comes from multiple documents, combine it into a single coherent answer.
-- Cite the source document name when referencing specific facts (e.g. "According to [filename]...").
+- Cite the corresponding context section using bracket numbers like [1] or [2] at the end of the sentence or clause containing the fact. The bracket number must correspond to the section index (e.g. use [1] for the first section, [2] for the second). Do not create citations for section numbers that do not exist.
 - If the user is simply greeting you (e.g. "hi", "hello") or making general conversation, respond CONCISELY and politely without referencing the documents. Keep greetings to 1-2 sentences max.
 - Otherwise, if the answer to the user's specific question is not in the context, say: "The information is not available in the uploaded documents."
 - Do NOT stop after finding the first relevant sentence — check all context sections.
@@ -543,9 +829,12 @@ Question: {question}
 Comprehensive Answer:"""
                     else:
                         # Conversational fallback prompt (no context available)
+                        from datetime import datetime
+                        current_dt = datetime.now().strftime("%Y-%m-%d %I:%M %p")
                         rag_prompt = f"""You are a helpful, polite, and intelligent AI assistant. 
 The user is talking to you directly. Respond naturally to their greeting, pleasantry, or general question. 
 Keep your response CONCISE (1-2 sentences). Do not ramble or over-explain.
+The current system local date and time is: {current_dt}. If the user asks about the time or date, answer them directly and correctly based on this system date/time.
 If they ask about documents, remind them they haven't uploaded any or that no relevant documents were found.
 
 {history_text}User: {question}
@@ -586,9 +875,12 @@ Assistant:"""
                         )
                     )
                 else:
-                    # Generic response when offline and no chunks
                     lower_q = question.lower().strip()
-                    if lower_q in ["hi", "hello", "hey", "how are you", "who are you"]:
+                    time_keywords = {"time", "date", "today", "now", "clock"}
+                    if any(tk in lower_q for tk in time_keywords) and len(lower_q.split()) <= 6:
+                        from datetime import datetime
+                        answer = f"The current system date and time is {datetime.now().strftime('%A, %B %d, %Y, %I:%M %p')}."
+                    elif any(g in lower_q for g in ["hi", "hello", "hey", "how are you", "who are you"]):
                         answer = "Hello! I am SecureHall-RAG. I can help you answer questions about your documents."
                     else:
                         answer = "No relevant information found in the knowledge base."
@@ -682,6 +974,34 @@ Assistant:"""
                             f"{verified.rejected_count} rejected, "
                             f"confidence={verified_confidence:.2f}"
                         )
+
+                        # --- ACTIVE CRITIQUE & SELF-CORRECTION LOOP ---
+                        if verified_confidence < 0.80 and not is_web_search:
+                            logger.info(f"Answer confidence {verified_confidence:.2f} below threshold (0.80). Attempting self-correction...")
+                            unsupported_claims = []
+                            for c in verified.claims_breakdown:
+                                if c.support_level in [SupportLevel.UNSUPPORTED, SupportLevel.CONFLICTING] or c.decision == VerificationDecision.REFUSE:
+                                    unsupported_claims.append({
+                                        "claim": c.claim_text,
+                                        "support_level": c.support_level.value,
+                                        "reason": c.reasoning or "No clear evidence found in sources."
+                                    })
+                            if unsupported_claims:
+                                corrected_ans, new_conf, success = self._attempt_self_correction(
+                                    original_answer=answer,
+                                    context=context,
+                                    question=question,
+                                    verification_report=unsupported_claims,
+                                    verif_chunks=verif_chunks,
+                                    is_web_search=is_web_search,
+                                    max_retries=1
+                                )
+                                if success:
+                                    answer = corrected_ans
+                                    verified_confidence = new_conf
+                                    logger.info(f"Self-correction succeeded. New confidence: {new_conf:.2f}")
+                                else:
+                                    logger.info("Self-correction failed or abstained. Keeping original verified response.")
                 except Exception as e:
                     logger.warning(f"Verification pipeline failed (non-fatal): {e}")
             # ── End verification ───────────────────────────────────────────────
@@ -699,23 +1019,26 @@ Assistant:"""
                 # Clamp to [0, 1]
                 confidence = max(0.0, min(1.0, confidence))
 
+            # Apply Uncertainty Quantification
+            from .verification.uncertainty import UncertaintyQuantifier
+            answer, uncertainty_tier = UncertaintyQuantifier.process_response(answer or "", confidence)
+
             total_latency = (time.time() - start_time) * 1000
 
             result = {
                 "answer": answer.strip(),
                 "citations": citations,
                 "confidence": float(confidence),
+                "uncertainty_tier": uncertainty_tier,
                 "latency_ms": total_latency,
                 "retrieval_latency_ms": retrieval_time,
                 "generation_latency_ms": generation_time,
                 "sources": sorted(list(sources_set)),
             }
 
-            logger.info(
-                f"Query processed in {total_latency:.2f}ms "
-                f"(retrieval: {retrieval_time:.2f}ms, "
-                f"generation: {generation_time:.2f}ms)"
-            )
+            # Store in semantic cache
+            if self.enable_cache and self.cache and not is_conversational and answer:
+                self.cache.set(question, result)
 
             return result
 
@@ -749,24 +1072,126 @@ Assistant:"""
 
         is_conversational = self._is_conversational_query(question)
 
+        # Semantic Caching check
+        if self.enable_cache and self.cache and not is_conversational:
+            cached = self.cache.get(question)
+            if cached:
+                logger.info("SemanticCache: returning cached result via stream")
+                yield {
+                    "type": "metadata",
+                    "citations": cached["citations"],
+                    "sources": cached["sources"],
+                    "confidence": cached["confidence"],
+                    "cache_hit": True
+                }
+                yield {"type": "chunk", "content": cached["answer"]}
+                yield {
+                    "type": "done",
+                    "latency_ms": (time.time() - start_time) * 1000,
+                    "generation_latency_ms": 0.0
+                }
+                return
+
+        # Lazy LLM init for query rewriting if needed
+        if history and not is_conversational and not self.llm.is_loaded:
+            try:
+                self.llm.load_model()
+            except Exception as e:
+                logger.warning(f"LLM lazy init during query rewriting failed ({e})")
+
+        search_query = question
+        if history and self.llm.is_loaded and not is_conversational:
+            try:
+                search_query = self.llm.rewrite_query(question, history)
+            except Exception as e:
+                logger.error(f"Error during query rewriting: {e}")
+                search_query = question
+
+        # HyDE Query Expansion
+        if self.enable_hyde and self.llm.is_loaded and not is_conversational:
+            try:
+                hyde_doc = self.llm.generate_hypothetical_document(search_query)
+                if hyde_doc and hyde_doc != search_query:
+                    search_query = hyde_doc
+                    logger.info("HyDE: using hypothetical document for retrieval in stream")
+            except Exception as e:
+                logger.warning(f"HyDE generation failed in stream: {e}")
+
         try:
             # 1. Retrieve & Rerank (Synchronous)
             retrieval_start = time.time()
+            
+            # Detect multi-hop query
+            is_multihop = False
+            sub_questions = [search_query]
+            multihop_keywords = {"compare", "difference", "both", "and also", "as well as", "relation", "compare and contrast"}
+            has_keywords = any(k in search_query.lower() for k in multihop_keywords) or (" and " in search_query.lower() and len(search_query.split()) > 6)
+            
+            if self.llm.is_loaded and not is_conversational and has_keywords:
+                try:
+                    decomposed = self.llm.decompose_query(search_query)
+                    if len(decomposed) > 1:
+                        is_multihop = True
+                        sub_questions = decomposed
+                        logger.info(f"Multi-hop routing activated in stream. Sub-questions: {sub_questions}")
+                except Exception as e:
+                    logger.warning(f"Decomposition failed in stream: {e}")
+
             if self.index_built and not is_conversational:
-                fetch_k = (
-                    self.retrieval_top_k * 3
-                    if self.enable_reranking and self.reranker and self.reranker.is_loaded
-                    else self.retrieval_top_k
-                )
-                search_results = self.retriever.search(
-                    question, top_k=fetch_k, allowed_doc_ids=allowed_doc_ids
-                )
+                if is_multihop:
+                    combined_results = []
+                    seen_chunk_ids = set()
+                    fetch_k = (
+                        self.retrieval_top_k * 3
+                        if self.enable_reranking and self.reranker and self.reranker.is_loaded
+                        else self.retrieval_top_k
+                    )
+                    for sub_q in sub_questions:
+                        sub_results = self.retriever.search(
+                            sub_q, top_k=fetch_k, allowed_doc_ids=allowed_doc_ids
+                        )
+                        # Re-rank sub-results
+                        if (
+                            self.enable_reranking
+                            and self.reranker
+                            and self.reranker.is_loaded
+                            and sub_results
+                        ):
+                            sub_results = self.reranker.rerank(
+                                query=sub_q,
+                                results=sub_results,
+                                chunk_texts=self.chunk_id_to_text,
+                                top_k=self.retrieval_top_k,
+                            )
+                        for res in sub_results:
+                            if res.chunk_id not in seen_chunk_ids:
+                                seen_chunk_ids.add(res.chunk_id)
+                                combined_results.append(res)
+                    
+                    # Sort combined results by score descending
+                    combined_results.sort(key=lambda r: getattr(r, "hybrid_score", 0.0) or getattr(r, "raw_dense_score", 0.0), reverse=True)
+                    search_results = combined_results[:self.retrieval_top_k]
+                else:
+                    fetch_k = (
+                        self.retrieval_top_k * 3
+                        if self.enable_reranking and self.reranker and self.reranker.is_loaded
+                        else self.retrieval_top_k
+                    )
+                    search_results = self.retriever.search(
+                        search_query, top_k=fetch_k, allowed_doc_ids=allowed_doc_ids
+                    )
             else:
                 search_results = []
 
-            if self.enable_reranking and self.reranker and self.reranker.is_loaded and search_results:
+            if (
+                not is_multihop
+                and self.enable_reranking
+                and self.reranker
+                and self.reranker.is_loaded
+                and search_results
+            ):
                 search_results = self.reranker.rerank(
-                    query=question,
+                    query=search_query,
                     results=search_results,
                     chunk_texts=self.chunk_id_to_text,
                     top_k=self.retrieval_top_k,
@@ -802,7 +1227,7 @@ Assistant:"""
 
             if not is_conversational and (not search_results or confidence_score < 0.35):
                 logger.info(f"Low confidence ({confidence_score:.2f}) or empty results. Triggering web search fallback...")
-                web_results = self.web_search_service.search(question, num_results=3)
+                web_results = self.web_search_service.search(search_query, num_results=3)
                 if web_results:
                     is_web_search = True
                     confidence_score = 0.5 # Web search default confidence
@@ -818,6 +1243,8 @@ Assistant:"""
 
             # If not web search and we have local search results, populate citations from local
             if not is_web_search and search_results:
+                seen_parents = set()
+                parent_context_chunks = []
                 for result in search_results:
                     chunk_id = result.chunk_id
                     chunk_text = self.chunk_id_to_text.get(chunk_id, "")
@@ -825,8 +1252,11 @@ Assistant:"""
                     # Get metadata
                     chunk_metadata = self.metadata_store.get_chunk(chunk_id)
                     source_file = "Unknown"
-                    if chunk_metadata and chunk_metadata.source_doc:
-                        source_file = chunk_metadata.source_doc
+                    parent_id = ""
+                    if chunk_metadata:
+                        if chunk_metadata.source_doc:
+                            source_file = chunk_metadata.source_doc
+                        parent_id = getattr(chunk_metadata, "parent_chunk_id", "")
                     else:
                         parts = chunk_id.rsplit("_", 1)
                         if parts:
@@ -839,10 +1269,25 @@ Assistant:"""
                                         break
 
                     citations.append((chunk_id, source_file, chunk_text))
-                    context_chunks.append((chunk_text, result.hybrid_score, source_file))
                     sources_set.add(Path(source_file).name)
 
+                    if parent_id:
+                        if parent_id not in seen_parents:
+                            seen_parents.add(parent_id)
+                            parent_text = self.metadata_store.get_parent_text(parent_id)
+                            if parent_text:
+                                parent_context_chunks.append((parent_text, result.hybrid_score, source_file))
+                            else:
+                                parent_context_chunks.append((chunk_text, result.hybrid_score, source_file))
+                    else:
+                        parent_context_chunks.append((chunk_text, result.hybrid_score, source_file))
+                context_chunks = parent_context_chunks
+
             context = self.format_context(context_chunks)
+
+            # Apply Uncertainty Quantification
+            from .verification.uncertainty import UncertaintyQuantifier
+            uncertainty_tier = UncertaintyQuantifier.get_tier(confidence_score)
 
             # Yield metadata event immediately before generation starts
             yield {
@@ -850,8 +1295,19 @@ Assistant:"""
                 "citations": citations,
                 "sources": list(sources_set),
                 "confidence": confidence_score,
+                "uncertainty_tier": uncertainty_tier,
                 "retrieval_latency_ms": retrieval_time
             }
+
+            if uncertainty_tier == UncertaintyQuantifier.ABSTAIN:
+                abstain_msg = "I apologize, but I cannot find sufficient reliable evidence in the provided documents to answer your question with confidence."
+                yield {"type": "chunk", "content": abstain_msg}
+                yield {
+                    "type": "done",
+                    "latency_ms": (time.time() - start_time) * 1000,
+                    "generation_latency_ms": 0.0
+                }
+                return
 
             # 2. Format Prompt & Stream Generation
             generation_start = time.time()
@@ -881,7 +1337,7 @@ Assistant:"""
 Instructions:
 - Synthesize information from ALL relevant search results.
 - Give a comprehensive, detailed answer.
-- Cite the source URL when referencing specific facts (e.g. "According to [URL]...").
+- Cite the corresponding web search result using bracket numbers like [1] or [2] at the end of the sentence or clause containing the fact. The bracket number must correspond to the section index (e.g. use [1] for the first section, [2] for the second).
 - If the user is simply greeting you (e.g. "hi", "hello") or making general conversation, respond CONCISELY and politely without referencing search results. Keep greetings to 1-2 sentences max.
 - Otherwise, if the answer to the user's specific question is not in the context, say: "The information is not available in the search results."
 
@@ -898,7 +1354,7 @@ Instructions:
 - Synthesize information from ALL relevant sections of the context below.
 - Give a comprehensive, detailed answer covering all relevant points found.
 - If information comes from multiple documents, combine it into a single coherent answer.
-- Cite the source document name when referencing specific facts (e.g. "According to [filename]...").
+- Cite the corresponding context section using bracket numbers like [1] or [2] at the end of the sentence or clause containing the fact. The bracket number must correspond to the section index (e.g. use [1] for the first section, [2] for the second). Do not create citations for section numbers that do not exist.
 - If the user is simply greeting you (e.g. "hi", "hello") or making general conversation, respond CONCISELY and politely without referencing the documents. Keep greetings to 1-2 sentences max.
 - Otherwise, if the answer to the user's specific question is not in the context, say: "The information is not available in the uploaded documents."
 
@@ -909,9 +1365,13 @@ Question: {question}
 
 Comprehensive Answer:"""
                     else:
+                        from datetime import datetime
+                        current_dt = datetime.now().strftime("%Y-%m-%d %I:%M %p")
                         rag_prompt = f"""You are a helpful, polite, and intelligent AI assistant. 
 The user is talking to you directly. Respond naturally to their greeting, pleasantry, or general question. 
 Keep your response CONCISE (1-2 sentences). Do not ramble or over-explain.
+The current system local date and time is: {current_dt}. If the user asks about the time or date, answer them directly and correctly based on this system date/time.
+If they ask about documents, remind them they haven't uploaded any or that no relevant documents were found.
 
 {history_text}User: {question}
 
@@ -945,11 +1405,22 @@ Assistant:"""
                     )
                 else:
                     lower_q = question.lower().strip()
-                    if lower_q in ["hi", "hello", "hey", "how are you", "who are you"]:
+                    time_keywords = {"time", "date", "today", "now", "clock"}
+                    if any(tk in lower_q for tk in time_keywords) and len(lower_q.split()) <= 6:
+                        from datetime import datetime
+                        fallback = f"The current system date and time is {datetime.now().strftime('%A, %B %d, %Y, %I:%M %p')}."
+                    elif any(g in lower_q for g in ["hi", "hello", "hey", "how are you", "who are you"]):
                         fallback = "Hello! I am SecureHall-RAG. I can help you answer questions about your documents."
                     else:
                         fallback = "No relevant information found in the knowledge base."
                 yield {"type": "chunk", "content": fallback}
+
+            # If uncertainty tier is LOW, append disclaimer to response
+            if answer and uncertainty_tier == UncertaintyQuantifier.LOW:
+                disclaimer = "\n\n*Note: This answer was generated with low confidence from the source documents. Please verify with official channels.*"
+                if not answer.endswith(disclaimer):
+                    answer += disclaimer
+                    yield {"type": "chunk", "content": disclaimer}
 
             generation_time = (time.time() - generation_start) * 1000
 
@@ -1037,6 +1508,11 @@ Assistant:"""
         with open(data_path / "chunk_id_to_text.json", "w", encoding="utf-8") as f:
             json.dump(self.chunk_id_to_text, f, ensure_ascii=False, indent=2)
 
+        # Save parent_texts mapping if present
+        if hasattr(self.metadata_store, "parent_texts") and self.metadata_store.parent_texts:
+            with open(data_path / "parent_texts.json", "w", encoding="utf-8") as f:
+                json.dump(self.metadata_store.parent_texts, f, ensure_ascii=False, indent=2)
+
         # Save metadata store
         self.metadata_store.export_metadata(str(data_path / "metadata_store.json"))
 
@@ -1085,6 +1561,12 @@ Assistant:"""
             # Load metadata store if exists
             if metadata_store_path.exists():
                 self.metadata_store.import_metadata(str(metadata_store_path))
+
+            # Load parent_texts mapping if exists
+            parent_texts_path = data_path / "parent_texts.json"
+            if parent_texts_path.exists() and hasattr(self.metadata_store, "parent_texts"):
+                with open(parent_texts_path, "r", encoding="utf-8") as f:
+                    self.metadata_store.parent_texts = json.load(f)
 
             # Load corpus state
             if corpus_state_path.exists():

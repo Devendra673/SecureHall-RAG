@@ -225,6 +225,7 @@ export function ChatInterface() {
           updateMessage(localMsgId, {
             confidence: metadata.confidence,
             citations: metadata.citations as unknown as Citation[],
+            uncertainty_tier: metadata.uncertainty_tier,
           });
         },
         // onChunk
@@ -449,6 +450,7 @@ export function ChatInterface() {
                             citations={msg.citations}
                             answerId={metaMap.get(msg.id)?.answerId ?? msg.id}
                             confidence={msg.confidence}
+                            uncertaintyTier={msg.uncertainty_tier}
                             onShowCitations={() => openCitations(msg.citations)}
                           />
                         </div>

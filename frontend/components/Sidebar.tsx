@@ -232,6 +232,7 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
         content: m.content,
         confidence: m.confidence !== null ? m.confidence : undefined,
         citations: m.citations as any,
+        uncertainty_tier: m.uncertainty_tier !== null ? m.uncertainty_tier : undefined,
         timestamp: new Date(m.created_at),
       }));
 

@@ -5,7 +5,7 @@ Phase 2, Task 2.10
 Implements local LLM inference using Ollama and Mistral 7B model.
 """
 
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 import time
 import logging
 import psutil
@@ -292,6 +292,103 @@ class LLMInference:
         except Exception as e:
             logger.error(f"Streaming generation failed: {str(e)}")
             raise RuntimeError(f"LLM streaming failed: {str(e)}")
+
+    def rewrite_query(self, query: str, history: list[dict]) -> str:
+        """
+        Rewrite a follow-up query to be standalone using conversation history.
+        """
+        if not history:
+            return query
+
+        if not self.is_loaded:
+            return query
+
+        try:
+            history_text = "\n".join(
+                f"{msg.get('role', 'unknown').capitalize()}: {msg.get('content', '')}"
+                for msg in history
+            )
+
+            rewrite_prompt = (
+                "You are a query rewriter. Given a conversation history and a follow-up question, "
+                "rewrite the follow-up into a standalone, fully de-referenced search query. "
+                "Output ONLY the rewritten query text with no explanation, no quotes, and no preamble.\n\n"
+                f"Conversation history:\n{history_text}\n\n"
+                f"Follow-up question: {query}"
+            )
+
+            rewritten = self.generate(prompt=rewrite_prompt, max_tokens=150)
+            rewritten = rewritten.strip().strip('"\'')
+
+            if not rewritten or len(rewritten) > 500:
+                return query
+
+            logger.info(f"Query rewritten: '{query}' → '{rewritten}'")
+            return rewritten
+        except Exception as e:
+            logger.error(f"Failed to rewrite query: {str(e)}")
+            return query
+
+    def generate_hypothetical_document(self, query: str) -> str:
+        """
+        Generate a hypothetical document/passage to answer the query (HyDE pattern).
+        """
+        if not self.is_loaded:
+            return query
+
+        try:
+            hyde_prompt = (
+                "Write a short factual passage (2-3 sentences) that would directly and precisely answer the following question. "
+                "Do not preface it with anything. Output ONLY the passage text.\n\n"
+                f"Question: {query}"
+            )
+
+            hyde_doc = self.generate(prompt=hyde_prompt, max_tokens=200)
+            hyde_doc = hyde_doc.strip().strip('"\'')
+
+            if not hyde_doc or len(hyde_doc) > 600:
+                return query
+
+            logger.info(f"HyDE document generated for: '{query[:50]}...'")
+            return hyde_doc
+        except Exception as e:
+            logger.error(f"Failed to generate HyDE document: {str(e)}")
+            return query
+
+    def decompose_query(self, query: str) -> List[str]:
+        """
+        Decompose a complex multi-part query into a list of simpler sub-questions.
+        """
+        if not self.is_loaded:
+            return [query]
+
+        try:
+            decomposition_prompt = (
+                "You are an analyzer. Break down the following complex user question into 2 or 3 simpler, independent search sub-questions. "
+                "Output the sub-questions as a JSON list of strings and NOTHING else. Do not add markdown formatting or preambles.\n\n"
+                f"Question: {query}\n\n"
+                "JSON Output:"
+            )
+
+            response = self.generate(prompt=decomposition_prompt, max_tokens=150)
+            response = response.strip()
+            
+            # Clean up potential markdown JSON blocks
+            if response.startswith("```json"):
+                response = response[7:]
+            if response.endswith("```"):
+                response = response[:-3]
+            response = response.strip()
+
+            import json
+            sub_queries = json.loads(response)
+            if isinstance(sub_queries, list) and all(isinstance(q, str) for q in sub_queries):
+                logger.info(f"Decomposed query '{query}' into: {sub_queries}")
+                return sub_queries
+        except Exception as e:
+            logger.error(f"Failed to decompose query: {str(e)}")
+        
+        return [query]
 
     def generate_with_context(
         self, query: str, context: str, max_tokens: Optional[int] = None

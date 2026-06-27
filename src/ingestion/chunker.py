@@ -25,6 +25,8 @@ class Chunk:
     end_pos: int
     page_number: int = 1
     section: str = "General"
+    parent_chunk_id: str = ""
+    parent_text: str = ""
 
     def to_dict(self) -> Dict:
         """Convert chunk to dictionary"""
@@ -37,7 +39,9 @@ class Chunk:
             "page_number": self.page_number,
             "section": self.section,
             "length": len(self.text),
+            "parent_chunk_id": self.parent_chunk_id,
         }
+
 
 
 class SemanticChunker:
@@ -197,6 +201,72 @@ class SemanticChunker:
 
         logger.info(f"✓ Created {len(chunks)} chunks from {source_file}")
         return chunks
+
+    def chunk_with_parents(
+        self,
+        text: str,
+        source_file: str,
+        chunk_id_prefix: str = "doc",
+        child_size_tokens: int = 100,
+        parent_size_tokens: int = 600,
+    ) -> Tuple[List[Chunk], Dict[str, str]]:
+        """
+        Chunk documents using a parent-child relationship.
+        Searches can be done on smaller child chunks, but context retrieved uses parents.
+        """
+        # Create parent chunker
+        parent_chunker = SemanticChunker(
+            chunk_size_tokens=parent_size_tokens,
+            overlap_tokens=100,
+            chars_per_token=self.chars_per_token,
+        )
+
+        # Create child chunker
+        child_chunker = SemanticChunker(
+            chunk_size_tokens=child_size_tokens,
+            overlap_tokens=20,
+            chars_per_token=self.chars_per_token,
+        )
+
+        # Generate parent chunks
+        parent_chunks = parent_chunker.chunk(
+            text, source_file, chunk_id_prefix=f"{chunk_id_prefix}_parent"
+        )
+
+        all_child_chunks = []
+        child_to_parent = {}
+
+        for parent_chunk in parent_chunks:
+            parent_id = parent_chunk.chunk_id
+            # Chunk the parent's text to get child chunks
+            child_chunks = child_chunker.chunk(
+                parent_chunk.text,
+                source_file,
+                chunk_id_prefix=f"{parent_id}_child"
+            )
+
+            for child_chunk in child_chunks:
+                # Set parent properties
+                child_chunk.parent_chunk_id = parent_id
+                child_chunk.parent_text = parent_chunk.text
+
+                # Offset positions of the child chunk relative to the full document
+                child_chunk.start_pos += parent_chunk.start_pos
+                child_chunk.end_pos += parent_chunk.start_pos
+
+                # Inherit page and section
+                child_chunk.page_number = parent_chunk.page_number
+                child_chunk.section = parent_chunk.section
+
+                all_child_chunks.append(child_chunk)
+                child_to_parent[child_chunk.chunk_id] = parent_id
+
+        logger.info(
+            f"Parent-Child chunking: {len(parent_chunks)} parents, "
+            f"{len(all_child_chunks)} children"
+        )
+        return all_child_chunks, child_to_parent
+
 
     def chunk_preserves_sections(
         self, text: str, sections: Dict[str, Tuple[int, int]], source_file: str

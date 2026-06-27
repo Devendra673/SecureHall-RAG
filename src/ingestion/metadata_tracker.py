@@ -30,6 +30,7 @@ class ChunkMetadata:
     start_char: int = 0
     end_char: int = 0
     chunk_text_length: int = 0
+    parent_chunk_id: str = ""
 
     # Tracking info
     indexed_at: str = field(default_factory=lambda: datetime.now().isoformat())
@@ -43,6 +44,7 @@ class ChunkMetadata:
     def from_dict(cls, data: Dict) -> "ChunkMetadata":
         """Create from dictionary"""
         return cls(**data)
+
 
 
 @dataclass
@@ -96,6 +98,7 @@ class MetadataStore:
         """
         self.chunk_metadata: Dict[str, ChunkMetadata] = {}
         self.document_metadata: Dict[str, DocumentMetadata] = {}
+        self.parent_texts: Dict[str, str] = {}
         self.persist_path = persist_path
 
         # Initialize SQLite if persistence requested
@@ -126,10 +129,12 @@ class MetadataStore:
                 start_char INTEGER,
                 end_char INTEGER,
                 chunk_text_length INTEGER,
+                parent_chunk_id TEXT,
                 indexed_at TEXT,
                 embedding_model TEXT
             )
         """)
+
 
         # Documents table
         cursor.execute("""
@@ -199,6 +204,14 @@ class MetadataStore:
             self._persist_chunks_batch(chunks)
 
         logger.info(f"Added {len(chunks)} chunks to metadata store")
+
+    def store_parent_text(self, parent_id: str, text: str) -> None:
+        """Stores parent text in the metadata store"""
+        self.parent_texts[parent_id] = text
+
+    def get_parent_text(self, parent_id: str) -> str:
+        """Retrieves parent text by ID, returns empty string if not found"""
+        return self.parent_texts.get(parent_id, "")
 
     def get_chunk(self, chunk_id: str) -> Optional[ChunkMetadata]:
         """Get metadata for a specific chunk"""
@@ -345,8 +358,8 @@ class MetadataStore:
         cursor.execute(
             """
             INSERT OR REPLACE INTO chunks
-            (chunk_id, source_doc, section, page_num, start_char, end_char, chunk_text_length, indexed_at, embedding_model)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (chunk_id, source_doc, section, page_num, start_char, end_char, chunk_text_length, parent_chunk_id, indexed_at, embedding_model)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
             (
                 chunk.chunk_id,
@@ -356,6 +369,7 @@ class MetadataStore:
                 chunk.start_char,
                 chunk.end_char,
                 chunk.chunk_text_length,
+                chunk.parent_chunk_id,
                 chunk.indexed_at,
                 chunk.embedding_model,
             ),
@@ -381,6 +395,7 @@ class MetadataStore:
                 chunk.start_char,
                 chunk.end_char,
                 chunk.chunk_text_length,
+                chunk.parent_chunk_id,
                 chunk.indexed_at,
                 chunk.embedding_model,
             )
@@ -390,8 +405,8 @@ class MetadataStore:
         cursor.executemany(
             """
             INSERT OR REPLACE INTO chunks
-            (chunk_id, source_doc, section, page_num, start_char, end_char, chunk_text_length, indexed_at, embedding_model)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (chunk_id, source_doc, section, page_num, start_char, end_char, chunk_text_length, parent_chunk_id, indexed_at, embedding_model)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
             data,
         )

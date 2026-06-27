@@ -23,6 +23,7 @@ from .routers import query, documents, settings as settings_router
 from .routers import auth as auth_router
 from .routers import admin as admin_router
 from .routers import feedback as feedback_router
+from .routers import evaluation as evaluation_router
 from .services.rag_engine import get_pipeline, is_pipeline_ready
 from .db.models import init_db
 
@@ -222,6 +223,13 @@ app.include_router(
 app.include_router(
     feedback_router.router,
     prefix=f"{settings.API_V1_PREFIX}",
+)
+
+# Phase 11 — Evaluation routes
+app.include_router(
+    evaluation_router.router,
+    prefix=f"{settings.API_V1_PREFIX}/evaluation",
+    tags=["Admin"],
 )
 
 

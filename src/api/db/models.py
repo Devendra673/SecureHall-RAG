@@ -22,6 +22,7 @@ from sqlalchemy import (
     Text,
     create_engine,
     event,
+    Float,
 )
 from sqlalchemy.orm import DeclarativeBase, Session, relationship, sessionmaker
 
@@ -142,6 +143,7 @@ class ChatMessage(Base):
     citations_json = Column(Text, nullable=True, default="[]")
     sources_json = Column(Text, nullable=True, default="[]")
     hallucination_risk = Column(String(50), nullable=True, default="unknown")
+    uncertainty_tier = Column(String(50), nullable=True)
     latency_ms = Column(Integer, nullable=True, default=0)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
@@ -240,6 +242,7 @@ class QueryHistory(Base):
     sources_json = Column(Text, nullable=False, default="[]")
     confidence = Column(Integer, nullable=False, default=0)  # 0-100
     hallucination_risk = Column(String(50), nullable=False, default="unknown")
+    uncertainty_tier = Column(String(50), nullable=True)
     latency_ms = Column(Integer, nullable=False, default=0)
     is_pinned = Column(Boolean, default=False, nullable=False)
     title = Column(String(255), nullable=True)
@@ -250,6 +253,21 @@ class QueryHistory(Base):
 
     def __repr__(self) -> str:
         return f"<QueryHistory {self.answer_id} user={self.user_id[:8]}>"
+
+
+class EvaluationMetric(Base):
+    __tablename__ = "evaluation_metrics"
+    
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    query = Column(Text, nullable=False)
+    answer = Column(Text, nullable=False)
+    context = Column(Text, nullable=False)
+    faithfulness_score = Column(Float, nullable=True)
+    answer_relevance_score = Column(Float, nullable=True)
+    context_recall_score = Column(Float, nullable=True)
+    nli_faithfulness_score = Column(Float, nullable=True)
+    evaluated_at = Column(DateTime, default=datetime.utcnow)
+    user_id = Column(String(36), nullable=True)
 
 
 # ── DB Initialisation ────────────────────────────────────────────────────────
@@ -267,6 +285,7 @@ def init_db() -> None:
             "citations_json": "TEXT NULL",
             "sources_json": "TEXT NULL",
             "hallucination_risk": "VARCHAR(50) NULL",
+            "uncertainty_tier": "VARCHAR(50) NULL",
             "latency_ms": "INTEGER NULL DEFAULT 0"
         }
         
@@ -283,6 +302,38 @@ def init_db() -> None:
                     logging.getLogger("securehall-rag").error(
                         f"Migration failed to add column '{col_name}': {alter_err}"
                     )
+
+        # Migrate query_history table to add uncertainty_tier
+        qh_result = conn.exec_driver_sql("PRAGMA table_info(query_history)").fetchall()
+        qh_cols = {row[1] for row in qh_result}
+        if "uncertainty_tier" not in qh_cols:
+            try:
+                conn.exec_driver_sql("ALTER TABLE query_history ADD COLUMN uncertainty_tier VARCHAR(50) NULL")
+                import logging
+                logging.getLogger("securehall-rag").info(
+                    "Migration: Added missing column 'uncertainty_tier' to query_history table."
+                )
+            except Exception as alter_err:
+                import logging
+                logging.getLogger("securehall-rag").error(
+                    f"Migration failed to add column 'uncertainty_tier': {alter_err}"
+                )
+
+        # Migrate evaluation_metrics table to add nli_faithfulness_score
+        eval_result = conn.exec_driver_sql("PRAGMA table_info(evaluation_metrics)").fetchall()
+        eval_cols = {row[1] for row in eval_result}
+        if "nli_faithfulness_score" not in eval_cols:
+            try:
+                conn.exec_driver_sql("ALTER TABLE evaluation_metrics ADD COLUMN nli_faithfulness_score FLOAT NULL")
+                import logging
+                logging.getLogger("securehall-rag").info(
+                    "Migration: Added missing column 'nli_faithfulness_score' to evaluation_metrics table."
+                )
+            except Exception as alter_err:
+                import logging
+                logging.getLogger("securehall-rag").error(
+                    f"Migration failed to add column 'nli_faithfulness_score': {alter_err}"
+                )
 
     # Seed default admin
     with SessionLocal() as db:
