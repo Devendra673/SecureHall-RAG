@@ -361,6 +361,24 @@ class RAGPipeline:
             logger.error(f"Ingestion failed: {str(e)}")
             raise RuntimeError(f"Document ingestion failed: {str(e)}")
 
+    def _is_summary_query(self, question: str) -> bool:
+        """
+        Detect if the query is asking for a document-level summary or overview.
+        These queries have no matching text in any document chunk, so retrieval
+        similarity is inherently low — they must NOT trigger the web search fallback.
+        """
+        q = question.lower().strip().rstrip("?.!")
+        summary_phrases = [
+            "summarize", "summary", "summarise", "overview", "give me an overview",
+            "what are the documents about", "what is in the documents",
+            "brief overview", "key points", "main points", "highlights",
+            "what documents do you have", "list the documents", "what files",
+            "give me a summary", "can you summarize", "please summarize",
+            "explain the documents", "what topics", "what does the document cover",
+            "what is covered", "tell me about the documents", "describe the documents",
+        ]
+        return any(phrase in q for phrase in summary_phrases)
+
     def _is_conversational_query(self, question: str) -> bool:
         """Check if the question is a greeting or general pleasantry that doesn't need RAG context."""
         q = question.lower().strip().rstrip("?.!")
@@ -704,7 +722,33 @@ Question: {question}"""
             context_chunks = []
             sources_set = set()
 
-            if not is_conversational and (not search_results or calibrated < 0.35):
+            is_summary = self._is_summary_query(question)
+
+            if not is_conversational and is_summary and self._corpus_texts:
+                # Summary queries: use all RAPTOR summary nodes if available,
+                # otherwise fall back to the first N chunks from the full corpus.
+                logger.info("Summary query detected — bypassing web fallback, using corpus overview.")
+                raptor_ids = [cid for cid in self._corpus_chunk_ids if cid.startswith("raptor_summary_")]
+                if raptor_ids:
+                    # Use RAPTOR summaries as the context
+                    for cid in raptor_ids[:self.retrieval_top_k]:
+                        text = self.chunk_id_to_text.get(cid, "")
+                        if text:
+                            citations.append((cid, "RAPTOR Cluster Summary", text))
+                            context_chunks.append((text, 1.0, "RAPTOR Cluster Summary"))
+                            sources_set.add("RAPTOR Cluster Summary")
+                    calibrated = 0.8  # high confidence — we're using our own summaries
+                elif self._corpus_texts:
+                    # No RAPTOR nodes built yet — use first N raw chunks as fallback overview
+                    for idx, (cid, text) in enumerate(zip(self._corpus_chunk_ids, self._corpus_texts)):
+                        if idx >= self.retrieval_top_k:
+                            break
+                        citations.append((cid, "Document Overview", text))
+                        context_chunks.append((text, 0.7, "Document Overview"))
+                        sources_set.add("Document Overview")
+                    calibrated = 0.7
+
+            elif not is_conversational and not is_summary and (not search_results or calibrated < 0.35):
                 logger.info(f"Low confidence ({calibrated:.2f}) or empty results. Triggering web search fallback...")
                 web_results = self.web_search_service.search(search_query, num_results=3)
                 if web_results:

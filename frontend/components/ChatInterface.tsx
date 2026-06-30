@@ -13,6 +13,9 @@ import {
   Moon,
   Sun,
   Monitor,
+  FileText,
+  FileJson,
+  File,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -317,15 +320,15 @@ export function ChatInterface() {
             {/* Export dropdown */}
             <div className="relative">
             <Button
-              variant="ghost"
+              variant="outline"
               size="sm"
-              className="h-8 text-xs gap-1.5"
+              className="h-8 text-xs gap-1.5 font-medium border-white/20 dark:border-white/10"
               onClick={() => setExportMenuOpen((v) => !v)}
               disabled={messages.length === 0}
             >
-              <Download className="h-3.5 w-3.5" />
+              <Download className="h-3.5 w-3.5 text-primary" />
               Export
-              <ChevronDown className="h-3 w-3" />
+              <ChevronDown className="h-3 w-3 text-muted-foreground" />
             </Button>
 
             <AnimatePresence>
@@ -335,19 +338,20 @@ export function ChatInterface() {
                   animate={{ opacity: 1, y: 0, scale: 1 }}
                   exit={{ opacity: 0, y: -4, scale: 0.97 }}
                   transition={{ duration: 0.12 }}
-                  className="absolute right-0 top-full mt-1 z-50 w-44 rounded-lg border bg-popover shadow-lg overflow-hidden"
+                  className="absolute right-0 top-full mt-1.5 z-50 w-48 rounded-xl border border-border/80 bg-popover/95 text-popover-foreground backdrop-blur-md shadow-xl overflow-hidden p-1 flex flex-col gap-0.5"
                 >
                   {[
-                    { label: "Markdown (.md)", action: exportMarkdown },
-                    { label: "Plain Text (.txt)", action: exportText },
-                    { label: "JSON (.json)", action: exportJson },
-                  ].map(({ label, action }) => (
+                    { label: "Markdown (.md)", icon: <FileText className="h-3.5 w-3.5 text-blue-500/80" />, action: exportMarkdown },
+                    { label: "Plain Text (.txt)", icon: <File className="h-3.5 w-3.5 text-muted-foreground/80" />, action: exportText },
+                    { label: "JSON (.json)", icon: <FileJson className="h-3.5 w-3.5 text-purple-500/80" />, action: exportJson },
+                  ].map(({ label, icon, action }) => (
                     <button
                       key={label}
                       onClick={action}
-                      className="w-full text-left px-3 py-2 text-xs hover:bg-muted transition-colors"
+                      className="w-full flex items-center gap-2 text-left px-2.5 py-1.5 text-xs text-popover-foreground hover:bg-accent hover:text-accent-foreground rounded-lg transition-all duration-150 cursor-pointer font-medium"
                     >
-                      {label}
+                      {icon}
+                      <span>{label}</span>
                     </button>
                   ))}
                 </motion.div>
