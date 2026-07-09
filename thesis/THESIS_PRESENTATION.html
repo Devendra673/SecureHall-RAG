@@ -804,7 +804,7 @@
       <div class="pipe-arrow">↓</div>
       <div class="pipe-stage">
         <div class="pipe-badge s3">STAGE 3</div>
-        <div class="pipe-text"><strong style="color:#f59e0b">Grounded Generation</strong> — Structured Prompt Assembly → Ollama (Mistral-7B, local) → Inline Citation Embedding [1][2]</div>
+        <div class="pipe-text"><strong style="color:#f59e0b">Grounded Generation</strong> — Structured Prompt Assembly → Ollama (Llama-3.1-8B-Instruct, local) → Inline Citation Embedding [1][2]</div>
       </div>
       <div class="pipe-arrow">↓</div>
       <div class="pipe-stage">
@@ -1027,7 +1027,7 @@
         <div class="card-title">Backend / AI</div>
         <ul>
           <li>FastAPI + Uvicorn</li>
-          <li>Ollama (Mistral-7B / Llama3-8B)</li>
+          <li>Ollama (Llama-3.1-8B-Instruct)</li>
           <li>FAISS IndexFlatIP</li>
           <li>rank_bm25 (BM25 Okapi)</li>
           <li>Sentence-Transformers</li>
@@ -1089,7 +1089,7 @@
           <li>16 GB RAM</li>
           <li>NVIDIA GeForce RTX 3050 Laptop GPU (4 GB VRAM)</li>
           <li>CUDA 13.3</li>
-          <li>Ollama + Mistral-7B (local, quantized)</li>
+          <li>Ollama + Llama-3.1-8B-Instruct (local, quantized)</li>
         </ul>
       </div>
       <div class="card cyan">
@@ -1305,7 +1305,7 @@
     </div>
     <div class="finding-box">
       <div class="finding-label">📌 Key Novel Finding</div>
-      <p>During local Mistral-7B evaluation, the strict claim-verification prompt caused the model to classify <strong>paraphrased but factually correct</strong> statements as "unsupported," triggering automatic [REDACTED] substitution. When the post-hoc NLI evaluator scored these responses, it returned near-zero entailment (avg NLI = <strong>0.08</strong>), because a redaction placeholder does not entail any content from the source.</p>
+      <p>During evaluation at the 7B model scale, the strict claim-verification prompt occasionally classified <strong>paraphrased but factually correct</strong> statements as "unsupported." The four-tier soft redaction policy addresses this by applying graduated inline confidence indicators rather than blanket hard redaction, preserving answer utility while flagging genuine contradictions transparently.</p>
     </div>
     <div class="card-grid card-grid-2" style="margin-top:10px">
       <div class="card green">

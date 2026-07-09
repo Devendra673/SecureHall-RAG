@@ -40,7 +40,7 @@ The success of SecureHall-RAG has several broader implications for the field of 
 
 1. **Trustworthiness as a first-class requirement**: The results demonstrate that trustworthiness — encompassing hallucination prevention, uncertainty disclosure, and security hardening — must be treated as a first-class system requirement in enterprise AI deployments, not an afterthought.
 
-2. **Local LLMs are viable for enterprise RAG**: The system demonstrates that locally-deployed open-source LLMs (Mistral 7B, Llama 3 8B) are sufficient for high-quality enterprise policy QA, challenging the assumption that cloud LLMs are necessary for production-quality applications.
+2. **Local LLMs are viable for enterprise RAG**: The system demonstrates that locally-deployed open-source LLMs (Llama-3.1-8B-Instruct) are sufficient for high-quality enterprise policy QA, challenging the assumption that cloud LLMs are necessary for production-quality applications.
 
 3. **Hierarchical representations matter**: The RAPTOR results confirm that document structure and abstraction levels matter for retrieval quality. Flat chunking is insufficient for complex corpora, and investing in hierarchical representations pays dividends in retrieval accuracy.
 

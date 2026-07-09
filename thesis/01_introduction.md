@@ -81,7 +81,7 @@ This thesis addresses the following research questions:
 **Scope:**
 - The system targets English-language enterprise policy documents in PDF, DOCX, and TXT formats.
 - It is designed for local deployment on standard workstation hardware (no GPU required for CPU-based inference).
-- The LLM backend uses Ollama with Mistral 7B or Llama 3 8B models.
+- The LLM backend uses Ollama with Llama-3.1-8B-Instruct.
 - The evaluation focuses on correctness, faithfulness, retrieval precision, and security robustness.
 
 **Limitations:**

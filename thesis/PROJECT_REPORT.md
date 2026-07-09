@@ -332,7 +332,7 @@ This project aims to design, implement, and evaluate a system that:
 **Scope:**
 - The system targets English-language enterprise documents in PDF, DOCX, and TXT formats.
 - It is designed for local deployment on standard workstation hardware; a GPU is beneficial but not required.
-- The LLM backend uses Ollama with Mistral 7B or Llama 3 8B.
+- The LLM backend uses Ollama with Llama-3.1-8B-Instruct.
 - Evaluation focuses on retrieval quality, faithfulness, security robustness, and uncertainty calibration.
 
 **Limitations:**
@@ -516,7 +516,7 @@ User Query
 ┌─────────────────────────────────┐
 │  STAGE 3: GROUNDED GENERATION   │
 │  Structured Prompt Assembly     │
-│  Ollama LLM (Mistral-7B)        │
+│  Ollama LLM (Llama-3.1-8B)        │
 │  Inline Citation Embedding      │
 └────────────────┬────────────────┘
                  │
@@ -675,7 +675,7 @@ The SQLite database (via SQLAlchemy ORM) maintains seven tables:
 | Layer | Component | Technology | Version |
 |:---|:---|:---|:---:|
 | Backend Framework | API Server | FastAPI + Uvicorn | 0.110+ |
-| LLM Inference | Local LLM | Ollama (Mistral 7B / Llama 3 8B) | 0.1+ |
+| LLM Inference | Local LLM | Ollama (Llama-3.1-8B-Instruct) | 0.24+ |
 | Dense Retrieval | Vector Index | FAISS (`IndexFlatIP`) | 1.7+ |
 | Embeddings | Sentence Encoder | `all-MiniLM-L6-v2` | 2.6+ |
 | Sparse Retrieval | BM25 | `rank_bm25` (`BM25Okapi`) | 0.2+ |
@@ -1052,7 +1052,7 @@ Layer 1 handled **41 of 51** attacks at the regex level (before any LLM processi
 | Query embedding | 35 ms |
 | Hybrid retrieval (FAISS + BM25) | 42 ms |
 | Cross-encoder re-ranking | 210 ms |
-| LLM generation (Mistral 7B, ~512 tokens) | 12,500 ms |
+| LLM generation (Llama-3.1-8B, ~512 tokens) | 12,500 ms |
 | NLI verification (selective + batch + cache) | ~190 ms |
 | Self-correction iterations (capped at 2) | ~43,400 ms |
 | Context trimming | 3 ms |

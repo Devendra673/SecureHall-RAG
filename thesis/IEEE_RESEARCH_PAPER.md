@@ -85,7 +85,7 @@ User Query ► [ Layer 1: Content Filter ] (27+ Regex Signatures + 600-char cap)
                [ Cross-Encoder Re-ranker ] (ms-marco-MiniLM-L-6-v2)
                      │
                      ▼
-               [ LLM Generator ] (Mistral-7B via Ollama, local)
+               [ LLM Generator ] (Llama-3.1-8B-Instruct via Ollama, local)
                      │
                      ▼
                [ NLI Faithfulness Scorer ] ──► Self-Correction Loop

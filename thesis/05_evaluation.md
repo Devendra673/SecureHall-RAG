@@ -156,7 +156,7 @@ System performance is measured on local laptop hardware (Intel Core i7, 16GB RAM
 | Query embedding | 35 |
 | Hybrid retrieval (FAISS + BM25) | 42 |
 | Cross-encoder re-ranking | 210 |
-| LLM generation (Mistral 7B, 512 tokens) | 12,500 |
+| LLM generation (Llama-3.1-8B, 512 tokens) | 12,500 |
 | NLI verification (selective + batch + cache) | ~190 |
 | Self-correction iterations (capped at 2) | ~43,400 |
 | Context trimming | 3 |

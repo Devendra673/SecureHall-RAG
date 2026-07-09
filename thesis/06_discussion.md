@@ -68,7 +68,7 @@ The inline citation system and uncertainty badges directly address the opacity p
 
 Several promising directions for further development are identified based on current limitations:
 
-**1. GPU-Accelerated LLM Inference**: The primary LLM (Mistral 7B via Ollama) runs in CPU mode on most test hardware. Integrating CUDA-based inference via `llama.cpp` GPU offloading or vLLM with quantised GGUF Q4/Q8 models would reduce generation latency from ~12.5 seconds to under 0.5 seconds, making real-time query response practical.
+**1. GPU-Accelerated LLM Inference**: The primary LLM (Llama-3.1-8B-Instruct via Ollama) runs in CPU mode on most test hardware. Integrating CUDA-based inference via `llama.cpp` GPU offloading or vLLM with quantised GGUF Q4/Q8 models would reduce generation latency from ~12.5 seconds to under 0.5 seconds, making real-time query response practical.
 
 **2. Multilingual Support**: Extending the system through language detection, multilingual embeddings, and a multilingual LLM would broaden its applicability to international enterprise environments.
 

@@ -11,7 +11,7 @@ The implementation uses a modern, open-source technology stack chosen for local 
 | Layer | Component | Technology | Version |
 |---|---|---|---|
 | Backend Framework | API Server | FastAPI + Uvicorn | 0.110+ |
-| LLM Inference | Local LLM | Ollama (Mistral 7B / Llama 3 8B) | 0.1+ |
+| LLM Inference | Local LLM | Ollama (Llama-3.1-8B-Instruct) | 0.24+ |
 | Dense Retrieval | Vector Index | FAISS (`IndexFlatIP`) | 1.7+ |
 | Embeddings | Sentence Encoder | Sentence-Transformers `all-MiniLM-L6-v2` | 2.6+ |
 | Sparse Retrieval | BM25 | `rank_bm25` (`BM25Okapi`) | 0.2+ |

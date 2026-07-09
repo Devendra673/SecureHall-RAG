@@ -82,7 +82,7 @@ Context lists from all sub-questions are merged and deduplicated by chunk ID bef
 
 ### 3.5 Generation and NLI Verification
 
-The assembled context, user query, and system template are passed to Mistral-7B running locally via Ollama. The LLM generates an answer with inline citation brackets indicating which retrieved chunk each claim is drawn from.
+The assembled context, user query, and system template are passed to Llama-3.1-8B-Instruct running locally via Ollama. The LLM generates an answer with inline citation brackets indicating which retrieved chunk each claim is drawn from.
 
 Once a draft answer is generated, the NLI verification module tokenises it into individual sentences. Each sentence $s_i$ is scored against the full retrieved context $C$ using a DeBERTa-based NLI cross-encoder, which outputs logits $l_0$ (contradiction), $l_1$ (entailment), and $l_2$ (neutral). The entailment probability is:
 

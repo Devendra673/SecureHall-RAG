@@ -898,7 +898,7 @@ Question: {question}"""
                 logger.info("LLM not yet loaded — attempting lazy init now...")
                 try:
                     self.llm.load_model()
-                    logger.info("Mistral model connected successfully.")
+                    logger.info("Llama 3.1 model connected successfully.")
                 except Exception as e:
                     logger.warning(
                         f"LLM lazy init failed ({e}) — using retrieval-only mode."
@@ -1839,7 +1839,7 @@ if __name__ == "__main__":
 
     # Create pipeline
     pipeline = RAGPipeline(
-        llm_model="mistral",
+        llm_model="llama3.1",
         chunk_size_tokens=300,
         retrieval_top_k=5,
         enable_reranking=True,

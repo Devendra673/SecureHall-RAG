@@ -2,7 +2,7 @@
 LLM Inference Engine (Local)
 Phase 2, Task 2.10
 
-Implements local LLM inference using Ollama and Mistral 7B model.
+Implements local LLM inference using Ollama and Llama-3.1-8B-Instruct model.
 """
 
 from typing import Optional, Dict, List
@@ -23,10 +23,10 @@ logger = logging.getLogger(__name__)
 
 class LLMInference:
     """
-    Local LLM inference using Ollama and Mistral 7B.
+    Local LLM inference using Ollama and Llama-3.1-8B-Instruct.
 
-    Acceptance Criteria (Task 2.10):
-    - ✅ Load Mistral 7B model via Ollama
+    Key capabilities:
+    - ✅ Load Llama-3.1-8B-Instruct model via Ollama
     - ✅ Generate responses from prompts
     - ✅ Measure latency and memory usage
     - ✅ Support prompt formatting
@@ -39,7 +39,7 @@ class LLMInference:
 
     Architecture:
     - Uses Ollama daemon for model serving
-    - Mistral 7B: 7 billion parameters, ~4GB VRAM required
+    - Llama-3.1-8B-Instruct: 8 billion parameters, ~5GB VRAM recommended
     - Temperature: 0.3 for more deterministic outputs (RAG use case)
     """
 
@@ -55,10 +55,10 @@ class LLMInference:
         Initialize LLM inference engine.
 
         Args:
-            model_name: Model identifier for Ollama (default "mistral")
-                       - "mistral": Mistral 7B (recommended)
-                       - "neural-chat": Alternative 7B model
-                       - "orca-mini": Smaller alternative (~3B)
+            model_name: Model identifier for Ollama (default "llama3.1")
+                       - "llama3.1": Llama-3.1-8B-Instruct (recommended, best quality)
+                       - "phi3.5": Phi-3.5-mini-instruct (faster, ~3.8B params)
+                       - "mistral": Mistral 7B (legacy baseline)
             temperature: Sampling temperature (0-1, lower = more deterministic)
                         Default 0.3 for RAG consistency
             max_tokens: Maximum tokens to generate per response (default 512)
@@ -483,7 +483,7 @@ if __name__ == "__main__":
 
     try:
         # Create inference engine
-        llm = LLMInference(model_name="mistral", temperature=0.3)
+        llm = LLMInference(model_name="llama3.1", temperature=0.3)
         print(f"\n✓ Created LLMInference: {llm.model_name}")
 
         # Load model
@@ -556,7 +556,7 @@ if __name__ == "__main__":
             print("\nPlease ensure:")
             print("1. Ollama is installed (https://ollama.ai)")
             print("2. Ollama daemon is running: ollama serve")
-            print("3. Sufficient disk space (~4GB for Mistral 7B)")
+            print("3. Sufficient disk space (~5GB for Llama-3.1-8B)")
 
     except Exception as e:
         print(f"✗ Error during testing: {str(e)}")

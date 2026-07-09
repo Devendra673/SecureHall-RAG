@@ -97,7 +97,7 @@ This thesis presents **SecureHall-RAG**, a full-stack, locally-deployable Retrie
 
 4. **Prompt Injection Defense**: A 3-layer security framework detecting and blocking 17+ known prompt injection patterns, jailbreak attempts, and data exfiltration techniques with a 100% block rate on the test suite.
 
-The system is implemented as a production-grade full-stack application: a FastAPI backend with SQLite-backed conversational memory, JWT authentication, audit logging, Server-Sent Events (SSE) streaming, and a Next.js frontend with a glassmorphism UI featuring real-time streaming, inline citations, and color-coded uncertainty badges. The system requires no cloud API dependency and runs entirely on local hardware using Ollama with Mistral 7B or Llama 3 8B.
+The system is implemented as a production-grade full-stack application: a FastAPI backend with SQLite-backed conversational memory, JWT authentication, audit logging, Server-Sent Events (SSE) streaming, and a Next.js frontend with a glassmorphism UI featuring real-time streaming, inline citations, and color-coded uncertainty badges. The system requires no cloud API dependency and runs entirely on local hardware using Ollama with Llama-3.1-8B-Instruct.
 
 Evaluation demonstrates that the system achieves high faithfulness scores under NLI verification, effectively prevents hallucinated responses through uncertainty abstention, and successfully blocks all tested prompt injection attacks.
 
