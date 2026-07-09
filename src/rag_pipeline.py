@@ -84,7 +84,7 @@ class RAGPipeline:
     def __init__(
         self,
         llm_model: str = "llama3.1",
-        dense_model: str = "sentence-transformers/all-MiniLM-L6-v2",
+        dense_model: str = "sentence-transformers/all-mpnet-base-v2",
         chunk_size_tokens: int = 300,
         retrieval_top_k: int = 5,
         temperature: float = 0.3,

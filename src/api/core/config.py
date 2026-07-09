@@ -54,7 +54,7 @@ class Settings:
     # ── RAG pipeline ─────────────────────────────────────────────────────
     LLM_MODEL: str = os.getenv("LLM_MODEL", "llama3.1")
     DENSE_MODEL: str = os.getenv(
-        "DENSE_MODEL", "sentence-transformers/all-MiniLM-L6-v2"
+        "DENSE_MODEL", "sentence-transformers/all-mpnet-base-v2"
     )
     CHUNK_SIZE_TOKENS: int = int(os.getenv("CHUNK_SIZE_TOKENS", "300"))
     RETRIEVAL_TOP_K: int = int(os.getenv("RETRIEVAL_TOP_K", "5"))

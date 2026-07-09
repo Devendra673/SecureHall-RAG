@@ -45,7 +45,7 @@ class NLIFaithfulnessScorer:
         r"^(the (above|following|document|policy))",
     ]
 
-    def __init__(self, model_name: str = "cross-encoder/nli-deberta-v3-small", device: str = None):
+    def __init__(self, model_name: str = "cross-encoder/nli-deberta-v3-base", device: str = None):
         self.model_name = model_name
         self.model = None
         self._cache = {}

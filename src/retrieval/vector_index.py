@@ -51,20 +51,20 @@ class VectorIndex:
     - ✅ Index size reasonable (~100MB for 1000 chunks)
 
     Configuration:
-    - Default embedding dimension: 384 (all-MiniLM-L6-v2)
+    - Default embedding dimension: 768 (all-mpnet-base-v2)
     - Index type: IndexFlatL2 (exact L2 distance)
     - Optional: GPU acceleration via GPU index
     - Performance target: <100ms per query
     """
 
     def __init__(
-        self, embedding_dim: int = 384, index_type: str = "flat", use_gpu: bool = False
+        self, embedding_dim: int = 768, index_type: str = "flat", use_gpu: bool = False
     ):
         """
         Initialize vector index.
 
         Args:
-            embedding_dim: Dimension of embeddings (default 384 for MiniLM)
+            embedding_dim: Dimension of embeddings (default 768 for MPNet)
             index_type: Type of FAISS index ("flat" for exact search)
             use_gpu: Whether to use GPU acceleration
         """
@@ -362,12 +362,12 @@ if __name__ == "__main__":
     print("=" * 60)
 
     # Create index
-    index = VectorIndex(embedding_dim=384, use_gpu=False)
+    index = VectorIndex(embedding_dim=768, use_gpu=False)
     print("✓ Created vector index")
 
     # Generate random embeddings (simulating real embeddings)
     n_chunks = 100
-    embeddings = np.random.randn(n_chunks, 384).astype(np.float32)
+    embeddings = np.random.randn(n_chunks, 768).astype(np.float32)
     chunk_ids = [f"chunk_{i:04d}" for i in range(n_chunks)]
 
     # Normalize embeddings (approximate unit norm)
@@ -382,7 +382,7 @@ if __name__ == "__main__":
     print("Single Query Test")
     print("=" * 60)
 
-    query_emb = np.random.randn(384).astype(np.float32)
+    query_emb = np.random.randn(768).astype(np.float32)
     query_emb = query_emb / np.linalg.norm(query_emb)
 
     results = index.search(query_emb, top_k=5)
@@ -399,7 +399,7 @@ if __name__ == "__main__":
     print("Batch Query Test")
     print("=" * 60)
 
-    batch_queries = np.random.randn(5, 384).astype(np.float32)
+    batch_queries = np.random.randn(5, 768).astype(np.float32)
     batch_queries = batch_queries / np.linalg.norm(batch_queries, axis=1, keepdims=True)
 
     batch_results = index.search_batch(batch_queries, top_k=3)
@@ -431,7 +431,7 @@ if __name__ == "__main__":
     print(f"✓ Saved index to {index_file}")
 
     # Create new index and load
-    index2 = VectorIndex(embedding_dim=384)
+    index2 = VectorIndex(embedding_dim=768)
     index2.load_index(index_file, metadata_file)
     print(f"✓ Loaded index from {index_file}")
 

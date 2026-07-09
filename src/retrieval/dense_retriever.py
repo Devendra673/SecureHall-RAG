@@ -68,7 +68,7 @@ class DenseRetriever:
 
     def __init__(
         self,
-        model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
+        model_name: str = "sentence-transformers/all-mpnet-base-v2",
         device: str = "cpu",
     ):
         """
@@ -361,7 +361,7 @@ if __name__ == "__main__":
     print("=" * 60)
 
     # Create retriever
-    retriever = DenseRetriever(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    retriever = DenseRetriever(model_name="sentence-transformers/all-mpnet-base-v2")
     print("✓ Created DenseRetriever")
 
     # Sample texts (simulating chunks from documents)

@@ -34,7 +34,7 @@ class ChunkMetadata:
 
     # Tracking info
     indexed_at: str = field(default_factory=lambda: datetime.now().isoformat())
-    embedding_model: str = "all-MiniLM-L6-v2"
+    embedding_model: str = "all-mpnet-base-v2"
 
     def to_dict(self) -> Dict:
         """Convert to dictionary for serialization"""

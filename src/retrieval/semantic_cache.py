@@ -23,7 +23,7 @@ class SemanticCache:
         self, 
         similarity_threshold: float = 0.92, 
         max_size: int = 200,
-        embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+        embedding_model: str = "sentence-transformers/all-mpnet-base-v2"
     ):
         self.similarity_threshold = similarity_threshold
         self.max_size = max_size

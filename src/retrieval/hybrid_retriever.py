@@ -75,7 +75,7 @@ class HybridRetriever:
         self,
         dense_weight: float = 0.7,
         sparse_weight: float = 0.3,
-        dense_model: str = "sentence-transformers/all-MiniLM-L6-v2",
+        dense_model: str = "sentence-transformers/all-mpnet-base-v2",
         bm25_k1: float = 1.5,
         bm25_b: float = 0.75,
     ):
