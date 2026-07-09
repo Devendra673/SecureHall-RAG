@@ -45,7 +45,7 @@ class LLMInference:
 
     def __init__(
         self,
-        model_name: str = "mistral",
+        model_name: str = "llama3.1",
         temperature: float = 0.3,
         max_tokens: int = 512,
         top_p: float = 0.9,

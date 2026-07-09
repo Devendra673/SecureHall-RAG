@@ -52,7 +52,7 @@ class Settings:
     UPLOAD_DIR: str = os.getenv("UPLOAD_DIR", "uploaded_documents")
 
     # ── RAG pipeline ─────────────────────────────────────────────────────
-    LLM_MODEL: str = os.getenv("LLM_MODEL", "mistral")
+    LLM_MODEL: str = os.getenv("LLM_MODEL", "llama3.1")
     DENSE_MODEL: str = os.getenv(
         "DENSE_MODEL", "sentence-transformers/all-MiniLM-L6-v2"
     )
