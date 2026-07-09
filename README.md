@@ -20,10 +20,10 @@
 | Feature | Description |
 |---|---|
 | **Zero Hallucination** | Multi-layer claim verification using NLI entailment scoring + confidence thresholds |
-| **Prompt Injection Defense** | 3-layer protection against 17+ known injection patterns, jailbreaks, and exfiltration attacks |
+| **Prompt Injection Defense** | 3-layer protection against 27+ adversarial signatures, jailbreaks, and exfiltration attacks |
 | **Hybrid Retrieval** | Fuses dense (FAISS) and sparse (BM25) search for best-of-both-worlds context retrieval |
 | **Cross-Encoder Re-ranking** | `cross-encoder/ms-marco-MiniLM-L-6-v2` re-ranks retrieved chunks for precision |
-| **Local LLM Inference** | Runs fully locally via Ollama (Mistral, Llama 3) — no cloud API required |
+| **Local LLM Inference** | Runs fully locally via Ollama (Llama 3, Mistral) — no cloud API required |
 | **JWT Authentication** | Role-based access control with admin and user scopes |
 | **SSE Streaming** | Token-by-token response streaming via Server-Sent Events |
 | **Web Search Fallback** | Automatically queries Google/DuckDuckGo when local similarity < 0.35 |
@@ -157,9 +157,9 @@ During document ingestion, the `RaptorTreeBuilder`:
 Result: High-level global questions (e.g., *"What is the overall HR policy?"*) now retrieve relevant cluster summaries instead of random raw chunks.
 
 ### 4. Uncertainty Quantification `[src/verification/uncertainty.py]`
-Every answer is assigned a confidence tier based on the retrieval + NLI score:
+Confidence tiers are dynamically calibrated based on the detected category of the query. Comparative queries are evaluated under lenient boundaries, while direct factual queries employ strict boundaries to ensure precision. Default mappings are:
 
-| Tier | Score Range | Behaviour |
+| Tier | Default Range | Behaviour |
 |---|---|---|
 | `HIGH` | ≥ 0.75 | Answer returned as-is with green badge |
 | `MODERATE` | 0.50 – 0.75 | Answer returned with amber badge |
@@ -168,10 +168,19 @@ Every answer is assigned a confidence tier based on the retrieval + NLI score:
 
 The tier is stored in SQLite (`uncertainty_tier` column on `ChatMessage` and `QueryHistory`) and restored when loading past sessions.
 
-### 5. NLI Faithfulness Verification `[src/verification/nli_faithfulness.py]`
-Uses a cross-encoder NLI model to score entailment probability between the generated answer and the retrieved context. This catches cases where the LLM "drifts" from the source material even when source chunks were available.
+### 5. NLI Faithfulness & Soft Redaction `[src/verification/nli_faithfulness.py]`
+Uses a cross-encoder NLI model to evaluate entailment probability between each generated claim sentence and the retrieved context. Instead of binary hard redaction, the system applies a **four-tier soft redaction policy**:
+- Claims scoring ≥ 0.65 are accepted unchanged.
+- Claims scoring 0.40–0.64 append a warning flag (`⚠️`).
+- Claims scoring 0.25–0.39 append a low-confidence flag (`🔴`).
+- Only claims scoring < 0.25 (genuine contradictions) trigger hard redaction.
 
-### 6. Embedding Fine-tuning `[src/training/finetune_embeddings.py]`
+A sentence-type classifier skips non-claim sentences to reduce evaluation overhead by ~40%, and predictions are accelerated using a thread-safe MD5-based in-memory cache and model batching.
+
+### 6. Multi-Variant Query Expansion `[src/retrieval/query_expander.py]`
+For any query longer than four words, the local LLM generates alternative phrasings. The original query and all generated alternatives are retrieved independently, and result lists are merged using multi-list Reciprocal Rank Fusion (RRF), improving overall retrieval recall.
+
+### 7. Embedding Fine-tuning `[src/training/finetune_embeddings.py]`
 Supports domain-specific fine-tuning of SBERT embeddings using query-document pairs extracted from user feedback. Creates `ContrastiveTensionDataset` examples and runs lightweight adapter training to shift the embedding space toward domain vocabulary.
 
 ---
@@ -181,9 +190,13 @@ Supports domain-specific fine-tuning of SBERT embeddings using query-document pa
 ### Prerequisites
 - Python 3.10+
 - Node.js 18+
-- [Ollama](https://ollama.ai/) with Mistral or Llama 3 pulled locally
+- [Ollama](https://ollama.ai/) with Llama 3 (recommended for quality) or Mistral (baseline) pulled locally
 
 ```bash
+# Recommended: Llama 3 (8B) for better instruction following and lower over-redaction
+ollama pull llama3
+
+# Alternative: Mistral (7B) used in the thesis baseline evaluation
 ollama pull mistral
 ```
 
@@ -300,12 +313,13 @@ SecureHall-RAG/
 │   │   ├── bm25_retriever.py      # BM25 sparse keyword search
 │   │   ├── hybrid_retriever.py    # Reciprocal rank fusion
 │   │   ├── reranker.py            # Cross-encoder re-ranking
+│   │   ├── query_expander.py      # ★ NEW: LLM-driven query expansion
 │   │   ├── semantic_cache.py      # Cosine similarity query cache
 │   │   └── web_search.py          # Google/DuckDuckGo fallback
 │   ├── llm/
 │   │   └── inference.py           # Ollama LLM client + decompose_query() ★ NEW
 │   ├── security/
-│   │   ├── content_filter.py      # 17+ injection pattern detection
+│   │   ├── content_filter.py      # 27+ injection pattern detection + 600-char cap
 │   │   ├── safe_prompting.py      # Prompt sandboxing & role pinning
 │   │   └── prompt_templates.py    # Secure prompt scaffolding
 │   ├── verification/
@@ -377,7 +391,8 @@ The `sample_documents/` directory includes 10 representative enterprise policy d
 | Phase 5 | ✅ Complete | Persistent Indexes (FAISS + BM25) & Web Search Fallback |
 | Phase 6 | ✅ Complete | Docker Containerization & Local Deployment |
 | Phase 7–8 | ✅ Complete | Cross-Encoder Re-ranking, Role-Based Access Control, Admin Dashboard |
-| **Phase 9** | ✅ **Complete** | **Inline Citations, Multi-hop Reasoning, RAPTOR, Uncertainty Quantification** |
+| Phase 9 | ✅ Complete | Inline Citations, Multi-hop Reasoning, RAPTOR, Uncertainty Quantification |
+| **Phase 10** | ✅ **Complete** | **Verification Optimisation (Soft Redaction, NLI caching, batching) & Hardened Security (27+ patterns, length cap)** |
 
 ---
 

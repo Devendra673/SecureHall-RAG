@@ -130,6 +130,10 @@ class JailbreakPatterns:
         "uncensored mode",
         "ignore all previous",
         "ignore previous instructions",
+        "you are now dan",
+        "repeat your system prompt",
+        "disregard all previous",
+        "unrestricted access",
     ]
 
     # Patterns that indicate instruction injection (require specific combinations)
@@ -143,6 +147,12 @@ class JailbreakPatterns:
         r"(act\s+as\s+(?!an?\s+(employee|user|manager|hr|legal|analyst|advisor)))",
         r"(pretend\s+(you\s+are|to\s+be)\s+(?!an?\s+(employee|user|manager)))",
         r"(jailbreak|dan\s+mode|developer\s+mode|do\s+anything\s+now)",
+        r"(disregard|forget|ignore|override|bypass)\s+.*?\s+(above|previous|prior|all|system|instruction|rule)",
+        r"(act as|pretend to be|roleplay as|simulate being)\s+.*?",
+        r"(developer mode|unrestricted mode|no restrictions|jailbreak prompt)",
+        r"(translate|decode|convert|interpret|reverse)\s+.*?\s+(following|this|below)",
+        r"(base64|rot13|hex encoded|caesar cipher)",
+        r"(repeat|print|output|display|reveal|repeat|echo)\s+.*?\s+(system prompt|instruction|rule|guideline|context)",
     ]
 
     # Context phrases that make jailbreak more likely
@@ -297,6 +307,19 @@ class ContentFilter:
         Returns:
             FilterResult with safety assessment and actions
         """
+        # Length check first — very long inputs can bury attacks in noise
+        MAX_QUERY_CHARS = 600
+        if len(text) > MAX_QUERY_CHARS:
+            return FilterResult(
+                is_safe=False,
+                original_input=text,
+                filtered_input="[BLOCKED - Malicious content detected]",
+                detected_patterns=["length_limit_exceeded"],
+                severity_level=SeverityLevel.BLOCK,
+                reason=f"Input length ({len(text)} characters) exceeds the maximum limit of {MAX_QUERY_CHARS} characters.",
+                recommendations=["Shorten your query to be under 600 characters"],
+            )
+
         detected_patterns = []
         max_severity = SeverityLevel.WARN
         reasons = []

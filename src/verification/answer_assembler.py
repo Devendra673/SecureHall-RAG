@@ -176,38 +176,45 @@ class AnswerAssembler:
         Strategy: Redact claims that are explicitly rejected to mitigate hallucination.
         Append a compact verification note for any partial support.
         """
-        accepted = [
-            c for c in verified_claims if c.decision == VerificationDecision.ACCEPT
-        ]
-        partial = [
-            c
-            for c in verified_claims
-            if c.decision == VerificationDecision.PARTIAL_ACCEPT
-        ]
-        rejected = [
-            c for c in verified_claims if c.decision == VerificationDecision.REFUSE
-        ]
         total = len(verified_claims)
-
         answer = original_answer.strip()
 
-        # Hallucination Mitigation: Redact rejected claims inline
-        for c in rejected:
-            if c.original_sentence and c.original_sentence in answer:
-                answer = answer.replace(c.original_sentence, "[REDACTED: Unsupported/Contradicted Claim]")
-            elif c.claim_text and c.claim_text in answer:
-                answer = answer.replace(c.claim_text, "[REDACTED: Unsupported/Contradicted Claim]")
+        # Hallucination Mitigation: Redact or warn depending on score
+        redacted_count = 0
+        warned_count = 0
+        flagged_count = 0
 
-        # Append a small note only when there are unverified or rejected claims
+        for c in verified_claims:
+            if c.decision == VerificationDecision.ACCEPT:
+                continue
+
+            score = c.support_score
+
+            if score >= 0.65:
+                continue
+            elif score >= 0.40:
+                replacement = c.original_sentence.strip() + " ⚠️"
+                warned_count += 1
+            elif score >= 0.25:
+                replacement = c.original_sentence.strip() + " 🔴 *[Low confidence — verify directly]*"
+                flagged_count += 1
+            else:
+                replacement = "[REDACTED: Unsupported/Contradicted Claim]"
+                redacted_count += 1
+
+            if c.original_sentence and c.original_sentence in answer:
+                answer = answer.replace(c.original_sentence, replacement)
+            elif c.claim_text and c.claim_text in answer:
+                answer = answer.replace(c.claim_text, replacement)
+
+        # Append a small note only when there are unverified, low confidence, or redacted claims
         notes = []
-        if partial:
-            notes.append(
-                f"⚠️ {len(partial)} claim(s) only partially supported by the documents."
-            )
-        if rejected and total > 0:
-            notes.append(
-                f"🚨 {len(rejected)} unsupported claim(s) were redacted from the response to prevent hallucination."
-            )
+        if warned_count:
+            notes.append(f"⚠️ {warned_count} claim(s) only partially supported by the documents.")
+        if flagged_count:
+            notes.append(f"🔴 {flagged_count} claim(s) verified with low confidence.")
+        if redacted_count:
+            notes.append(f"🚨 {redacted_count} unsupported claim(s) redacted to prevent hallucination.")
 
         if notes:
             answer = answer + "\n\n" + "  \n".join(notes)

@@ -22,6 +22,7 @@ try:
     from .retrieval.reranker import CrossEncoderReRanker
     from .llm.inference import LLMInference
     from .retrieval.web_search import WebSearchService
+    from .retrieval.query_expander import QueryExpander
 except ImportError:
     # Standalone / script usage
     sys.path.insert(0, str(Path(__file__).parent))
@@ -32,6 +33,7 @@ except ImportError:
     from retrieval.reranker import CrossEncoderReRanker
     from llm.inference import LLMInference
     from retrieval.web_search import WebSearchService
+    from retrieval.query_expander import QueryExpander
 
 # ── Verification pipeline (optional — gracefully skipped if unavailable) ──────
 try:
@@ -437,6 +439,7 @@ class RAGPipeline:
         verif_chunks: list,
         is_web_search: bool,
         max_retries: int = 1,
+        prev_confidence: float = 0.0,
     ) -> Tuple[str, float, bool]:
         """
         Attempt to rewrite answer using LLM based on critique of unsupported claims.
@@ -507,7 +510,13 @@ Question: {question}"""
 
             if new_confidence >= 0.80:
                 return verified.verified_answer, new_confidence, True
-            elif max_retries > 0:
+
+            # If improvement is negligible, stop early
+            if new_confidence - prev_confidence < 0.05:
+                logger.info(f"Self-correction improvement ({new_confidence - prev_confidence:.2f}) < 5% - stopping early.")
+                return verified.verified_answer, new_confidence, False
+
+            if max_retries > 0:
                 # Recurse
                 new_verification_report = []
                 for c in verified.claims_breakdown:
@@ -525,6 +534,7 @@ Question: {question}"""
                     verif_chunks=verif_chunks,
                     is_web_search=is_web_search,
                     max_retries=max_retries - 1,
+                    prev_confidence=new_confidence,
                 )
             else:
                 return verified.verified_answer, new_confidence, False
@@ -532,6 +542,44 @@ Question: {question}"""
         except Exception as e:
             logger.error(f"Error during self-correction attempt: {e}")
             return original_answer, 0.0, False
+
+    def _rrf_merge(self, result_lists: List[List], top_k: int = 5, k: int = 60) -> List:
+        """
+        Reciprocal Rank Fusion across multiple ranked lists.
+        result_lists: list of lists, each list is [SearchResult, ...]
+        """
+        from collections import defaultdict
+        scores = defaultdict(float)
+        chunk_map = {}
+
+        for result_list in result_lists:
+            for rank, res in enumerate(result_list):
+                chunk_id = res.chunk_id
+                scores[chunk_id] += 1.0 / (k + rank + 1)
+                chunk_map[chunk_id] = res
+
+        sorted_ids = sorted(scores, key=lambda x: scores[x], reverse=True)
+        
+        merged = []
+        for cid in sorted_ids[:top_k]:
+            res = chunk_map[cid]
+            res.hybrid_score = scores[cid]
+            merged.append(res)
+        return merged
+
+    def _trim_context_chunks(self, chunks: List[Tuple], max_tokens: int = 1500) -> List[Tuple]:
+        trimmed = []
+        total_tokens = 0
+        for chunk in chunks:
+            text = chunk[0]
+            tokens = len(text) // 4
+            if total_tokens + tokens > max_tokens:
+                if not trimmed:
+                    trimmed.append(chunk)
+                break
+            trimmed.append(chunk)
+            total_tokens += tokens
+        return trimmed
 
     def query(
         self,
@@ -673,9 +721,22 @@ Question: {question}"""
                         if self.enable_reranking and self.reranker and self.reranker.is_loaded
                         else self.retrieval_top_k
                     )
-                    search_results = self.retriever.search(
-                        search_query, top_k=fetch_k, allowed_doc_ids=allowed_doc_ids
-                    )
+                    # Query Expansion (Phase 3)
+                    expander = QueryExpander(self.llm)
+                    query_variants = expander.expand(search_query, n=2)
+                    
+                    if len(query_variants) > 1:
+                        all_variant_results = []
+                        for variant in query_variants:
+                            variant_results = self.retriever.search(
+                                variant, top_k=fetch_k, allowed_doc_ids=allowed_doc_ids
+                            )
+                            all_variant_results.append(variant_results)
+                        search_results = self._rrf_merge(all_variant_results, top_k=fetch_k)
+                    else:
+                        search_results = self.retriever.search(
+                            search_query, top_k=fetch_k, allowed_doc_ids=allowed_doc_ids
+                        )
             else:
                 search_results = []
 
@@ -806,8 +867,27 @@ Question: {question}"""
                         parent_context_chunks.append((chunk_text, result.hybrid_score, source_file))
                 context_chunks = parent_context_chunks
 
+            # Trim context to 1500 tokens (Phase 6.2)
+            context_chunks = self._trim_context_chunks(context_chunks, max_tokens=1500)
+
             # Format context
             context = self.format_context(context_chunks)
+
+            # Early ABSTAIN logic (Phase 2.3)
+            if not is_conversational and not is_web_search and calibrated < 0.25 and not is_summary:
+                logger.info(f"Retrieval confidence {calibrated:.2f} is below 0.25. Skipping LLM generation and abstaining early.")
+                from .verification.uncertainty import UncertaintyQuantifier
+                answer, uncertainty_tier = UncertaintyQuantifier.process_response("", calibrated, query=question)
+                return {
+                    "answer": answer,
+                    "citations": [],
+                    "confidence": float(calibrated),
+                    "uncertainty_tier": uncertainty_tier,
+                    "latency_ms": (time.time() - start_time) * 1000,
+                    "retrieval_latency_ms": retrieval_time,
+                    "generation_latency_ms": 0.0,
+                    "sources": [],
+                }
 
             # Generate answer
             generation_start = time.time()
@@ -1065,7 +1145,7 @@ Assistant:"""
 
             # Apply Uncertainty Quantification
             from .verification.uncertainty import UncertaintyQuantifier
-            answer, uncertainty_tier = UncertaintyQuantifier.process_response(answer or "", confidence)
+            answer, uncertainty_tier = UncertaintyQuantifier.process_response(answer or "", confidence, query=question)
 
             total_latency = (time.time() - start_time) * 1000
 
@@ -1221,9 +1301,22 @@ Assistant:"""
                         if self.enable_reranking and self.reranker and self.reranker.is_loaded
                         else self.retrieval_top_k
                     )
-                    search_results = self.retriever.search(
-                        search_query, top_k=fetch_k, allowed_doc_ids=allowed_doc_ids
-                    )
+                    # Query Expansion (Phase 3)
+                    expander = QueryExpander(self.llm)
+                    query_variants = expander.expand(search_query, n=2)
+                    
+                    if len(query_variants) > 1:
+                        all_variant_results = []
+                        for variant in query_variants:
+                            variant_results = self.retriever.search(
+                                variant, top_k=fetch_k, allowed_doc_ids=allowed_doc_ids
+                            )
+                            all_variant_results.append(variant_results)
+                        search_results = self._rrf_merge(all_variant_results, top_k=fetch_k)
+                    else:
+                        search_results = self.retriever.search(
+                            search_query, top_k=fetch_k, allowed_doc_ids=allowed_doc_ids
+                        )
             else:
                 search_results = []
 
@@ -1327,11 +1420,18 @@ Assistant:"""
                         parent_context_chunks.append((chunk_text, result.hybrid_score, source_file))
                 context_chunks = parent_context_chunks
 
+            # Trim context to 1500 tokens (Phase 6.2)
+            context_chunks = self._trim_context_chunks(context_chunks, max_tokens=1500)
+
             context = self.format_context(context_chunks)
 
-            # Apply Uncertainty Quantification
+            # Apply Uncertainty Quantification (Phase 5)
             from .verification.uncertainty import UncertaintyQuantifier
-            uncertainty_tier = UncertaintyQuantifier.get_tier(confidence_score)
+            uncertainty_tier = UncertaintyQuantifier.get_tier(confidence_score, query=question)
+
+            # Early ABSTAIN check when confidence is below 0.25 (Phase 2.3)
+            if not is_conversational and not is_web_search and confidence_score < 0.25:
+                uncertainty_tier = UncertaintyQuantifier.ABSTAIN
 
             # Yield metadata event immediately before generation starts
             yield {
