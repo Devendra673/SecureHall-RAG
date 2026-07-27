@@ -139,11 +139,8 @@ sample_documents/
 app_data/
 scratch/
 project report/
-thesis/
 
 # OS generated files
 Thumbs.db
 
-# Documentation
-docs/
 
