@@ -140,6 +140,7 @@ app_data/
 scratch/
 project report/
 thesis/
+evaluation/
 Index Sheet-Project Report.docx
 
 # OS generated files
@@ -147,5 +148,6 @@ Thumbs.db
 
 # Documentation
 docs/
+
 
 
