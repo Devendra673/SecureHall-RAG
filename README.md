@@ -1,7 +1,7 @@
 # SecureHall-RAG
 
 <div align="center">
-  <img src="https://img.shields.io/badge/Status-Production%20Ready-brightgreen?style=for-the-badge" alt="Status" />
+  <img src="https://img.shields.io/badge/Status-Research%20Prototype-orange?style=for-the-badge" alt="Status" />
   <img src="https://img.shields.io/badge/Python-3.10%2B-blue?style=for-the-badge&logo=python" alt="Python" />
   <img src="https://img.shields.io/badge/Next.js-14-black?style=for-the-badge&logo=next.js" alt="Next.js" />
   <img src="https://img.shields.io/badge/FastAPI-0.110%2B-teal?style=for-the-badge&logo=fastapi" alt="FastAPI" />
@@ -10,7 +10,7 @@
 
 <br/>
 
-> **SecureHall-RAG** is an open-source, enterprise-grade **Retrieval-Augmented Generation (RAG)** system designed for corporate policy document Q&A. It combines a highly polished glassmorphism UI with an advanced multi-layer verification pipeline to prevent hallucinated answers, defend against prompt injection attacks, and bring academic state-of-the-art techniques (RAPTOR, multi-hop reasoning, uncertainty quantification) into production.
+> **SecureHall-RAG** is an open-source **Retrieval-Augmented Generation (RAG)** research prototype for corporate policy document Q&A. It combines a polished glassmorphism UI with a multi-layer verification pipeline that aims to *reduce* hallucinated answers, *mitigate* prompt-injection attacks, and bring academic techniques (RAPTOR, multi-hop reasoning, uncertainty quantification) into a working system. It is a final-year / thesis project; see the [measured evaluation results](evaluation/results/RESULTS.md) for honest, reproducible numbers and known limitations rather than marketing claims.
 
 ---
 
@@ -19,8 +19,8 @@
 ### 🔐 Core RAG & Security Features
 | Feature | Description |
 |---|---|
-| **Zero Hallucination** | Multi-layer claim verification using NLI entailment scoring + confidence thresholds |
-| **Prompt Injection Defense** | 3-layer protection against 27+ adversarial signatures, jailbreaks, and exfiltration attacks |
+| **Hallucination Mitigation** | Multi-layer claim verification using NLI entailment scoring + confidence thresholds + an ABSTAIN tier for low-support answers. Reduces (does not eliminate) unsupported claims |
+| **Prompt Injection Defense** | Layered protection combining a signature/pattern library with an embedding-similarity semantic detector. Measured attack-block rate: **61.3%** (see [RESULTS.md](evaluation/results/RESULTS.md)) — effective on known and paraphrased attacks, weaker on fully novel vectors |
 | **Hybrid Retrieval** | Fuses dense (FAISS) and sparse (BM25) search for best-of-both-worlds context retrieval |
 | **Cross-Encoder Re-ranking** | `cross-encoder/ms-marco-MiniLM-L-6-v2` re-ranks retrieved chunks for precision |
 | **Local LLM Inference** | Runs fully locally via Ollama (Llama 3, Mistral) — no cloud API required |
@@ -116,7 +116,7 @@ graph TD
 | **Re-ranking** | `cross-encoder/ms-marco-MiniLM-L-6-v2` |
 | **NLI Faithfulness** | `cross-encoder/nli-deberta-v3-small` |
 | **Clustering (RAPTOR)** | NumPy K-Means on SBERT embeddings |
-| **Security** | 3-layer injection defense (content filter, prompt templates, safe prompting) |
+| **Security** | Layered injection defense: signature/pattern content filter + embedding-similarity semantic attack detector (`all-MiniLM-L6-v2`) + prompt templates + safe prompting |
 | **Database** | SQLite + SQLAlchemy (users, sessions, messages, audit logs, history) |
 | **Caching** | Cosine-similarity semantic cache (Sentence-Transformers) |
 | **Web Fallback** | Google Custom Search API + DuckDuckGo fallback |
@@ -185,6 +185,23 @@ Supports domain-specific fine-tuning of SBERT embeddings using query-document pa
 
 ---
 
+## 📊 Measured Results (Honest Snapshot)
+
+These are real, reproducible numbers from `evaluation/`, not marketing claims. Full detail and limitations are in [RESULTS.md](evaluation/results/RESULTS.md). Regenerate with `python evaluation/run_ablation.py` followed by `python evaluation/compute_real_metrics.py`.
+
+| Area | Baseline | Enhanced | Notes |
+|---|:---:|:---:|---|
+| Retrieval P@1 (hybrid + reranker) | 0.85 (dense only) | 1.000 | Small 10-doc corpus with distinctive terminology |
+| Security attack-block rate | 54.8% (pattern only) | **61.3%** (pattern + semantic) | Semantic detector adds the paraphrased/contextual jailbreaks patterns miss, with no added false positives |
+| Security overall correct handling | 75.0% | **78.3%** | 60 adversarial cases |
+| Verification latency overhead | — | tens of seconds (CPU) | The NLI claim-splitting + self-correction loop makes several extra LLM calls; on CPU-mode Ollama this adds ~30–60 s/query. GPU inference is required for interactive latency. (The previously reported "+8.6 ms" was an artifact of a run where neither mode actually executed verification.) |
+
+**Honest limitations:** the security block rate is a genuine ceiling of the current approach — novel attack vectors still slip through. Answer-quality faithfulness measured by ROUGE-L is near-zero due to a metric/task mismatch (short auto-generated gold answers); a semantic faithfulness metric is now included as a better proxy. See RESULTS.md before citing any number.
+
+> ⚠️ **Baseline vs Enhanced quality numbers require a running Ollama LLM.** The claim-level verification loop only executes when the LLM is loaded, so the quality ablation must be run with Ollama active (`python evaluation/run_ablation.py`). The security ablation runs without an LLM.
+
+---
+
 ## 🚀 Quick Start
 
 ### Prerequisites
@@ -248,6 +265,22 @@ docker-compose up --build
 ---
 
 ## 🧪 Verification & Testing
+
+### Run the Ablation Study (Baseline vs Enhanced)
+```bash
+# Full quality + security ablation (requires Ollama running for quality metrics)
+python evaluation/run_ablation.py
+
+# Quick, category-balanced quality subset
+python evaluation/run_ablation.py --questions 15
+
+# Security ablation only — no LLM needed (pattern-only vs pattern+semantic)
+python evaluation/run_ablation.py --security-only
+
+# Aggregate the per-question / per-attack records into the final report
+python evaluation/compute_real_metrics.py
+```
+The runner writes genuinely differentiated `baseline_metrics.json` and `enhanced_metrics.json` (real per-question and per-attack records), toggling the single `enable_verification` pipeline flag and the `enable_semantic` security flag between the two modes.
 
 ### Run Feature Verification Scripts
 ```bash
@@ -386,13 +419,13 @@ The `sample_documents/` directory includes 10 representative enterprise policy d
 |---|---|---|
 | Phase 1 | ✅ Complete | Requirements, System Design, Evaluation Framework |
 | Phase 2 | ✅ Complete | Core RAG Pipeline (Ingestion, Hybrid Retrieval, Verification) |
-| Phase 3 | ✅ Complete | Security Hardening — 17+ injection patterns blocked (100% blocking) |
+| Phase 3 | ✅ Complete | Security Hardening — signature/pattern injection filter (measured pattern-only attack-block rate: 54.8%) |
 | Phase 4 | ✅ Complete | Conversational Memory (SQLite) & SSE Streaming |
 | Phase 5 | ✅ Complete | Persistent Indexes (FAISS + BM25) & Web Search Fallback |
 | Phase 6 | ✅ Complete | Docker Containerization & Local Deployment |
 | Phase 7–8 | ✅ Complete | Cross-Encoder Re-ranking, Role-Based Access Control, Admin Dashboard |
 | Phase 9 | ✅ Complete | Inline Citations, Multi-hop Reasoning, RAPTOR, Uncertainty Quantification |
-| **Phase 10** | ✅ **Complete** | **Verification Optimisation (Soft Redaction, NLI caching, batching) & Hardened Security (27+ patterns, length cap)** |
+| **Phase 10** | ✅ **Complete** | **Verification Optimisation (Soft Redaction, NLI caching, batching) & Hardened Security (pattern library + length cap + embedding-similarity semantic attack detector → attack-block rate improved 54.8% → 61.3%)** |
 
 ---
 

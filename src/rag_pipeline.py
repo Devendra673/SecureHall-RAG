@@ -92,6 +92,7 @@ class RAGPipeline:
         enable_reranking: bool = True,
         enable_hyde: bool = True,
         enable_cache: bool = True,
+        enable_verification: bool = True,
         data_dir: Optional[str] = None,
     ):
         """
@@ -120,6 +121,11 @@ class RAGPipeline:
         self.retrieval_top_k = retrieval_top_k
         self.enable_hyde = enable_hyde
         self.enable_cache = enable_cache
+        # When disabled, the claim-level NLI verification + self-correction loop
+        # is skipped entirely. This is the single toggle that distinguishes the
+        # "baseline" (retrieval + reranker only) from the "enhanced" (full
+        # verification) configuration used in the ablation study.
+        self.enable_verification = enable_verification
         self.enable_raptor = True
 
         self.cache = None
@@ -1015,7 +1021,7 @@ Assistant:"""
             # Run claim-level verification when LLM produced a real answer
             # (skip in retrieval-only mode where answer IS the raw context)
             verified_confidence = None
-            if _VERIFICATION_AVAILABLE and self.llm.is_loaded and not is_conversational:
+            if _VERIFICATION_AVAILABLE and self.enable_verification and self.llm.is_loaded and not is_conversational:
                 try:
                     verif_start = time.time()
 
@@ -1135,8 +1141,17 @@ Assistant:"""
                 confidence = 1.0
             else:
                 if verified_confidence is not None and verified_confidence > 0:
-                    # Blend calibrated retrieval (60%) + verification (40%)
-                    confidence = 0.6 * calibrated + 0.4 * float(verified_confidence)
+                    # Retrieval quality is the PRIMARY confidence signal. The NLI
+                    # verifier is designed to flag/redact unsupported claims — it
+                    # is a guard, not a retrieval-quality meter — and in CPU mode
+                    # its entailment scores are noisy. So we let verification
+                    # modulate confidence (mostly to boost well-supported answers)
+                    # but bound how far it can pull a well-grounded answer down.
+                    # Previously a straight 60/40 blend let a noisy verifier score
+                    # force otherwise well-retrieved answers into ABSTAIN, which
+                    # was the main cause of the very high abstention rate.
+                    blended = 0.7 * calibrated + 0.3 * float(verified_confidence)
+                    confidence = max(blended, 0.85 * calibrated)
                 else:
                     confidence = calibrated
 

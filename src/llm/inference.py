@@ -142,7 +142,14 @@ class LLMInference:
                 )
 
             # Pull model only if not already available locally (avoids re-download)
-            model_found = any(self.model_name in name for name in model_names)
+            matched_name = next((name for name in model_names if self.model_name in name), None)
+            if matched_name:
+                logger.info(f"Using matched local model name: {matched_name}")
+                self.model_name = matched_name
+                model_found = True
+            else:
+                model_found = False
+
             if not model_found:
                 logger.info(
                     f"Pulling model {self.model_name} (may take 2-3 min on first run)..."
