@@ -12,7 +12,7 @@ services:
       - ENVIRONMENT=production
       - HOST=0.0.0.0
       - PORT=8000
-      - GOOGLE_API_KEY=AIzaSyDtpq9IzllYr-mH3v4gUmw7NgIu21_Oudg
+      - GOOGLE_API_KEY=
       - GOOGLE_CX=b64d0187e3dfe4e6d
     volumes:
       - ./app_data:/app/app_data
